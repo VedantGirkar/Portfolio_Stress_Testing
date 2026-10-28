@@ -16,3 +16,4 @@ outputs/
 # Editor settings and tool caches
 .idea/
 graphify-out/
+.DS_Store
