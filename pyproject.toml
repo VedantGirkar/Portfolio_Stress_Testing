@@ -1,0 +1,17 @@
+[project]
+name = "stress-portfolio"
+version = "0.1.0"
+description = "Stress-tested equity portfolio research platform with derivative hedging"
+readme = "README.md"
+authors = [
+    { name = "Vedant Girkar", email = "vedantgirkar32@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+stress-portfolio = "stress_portfolio.main:main"
+
+[build-system]
+requires = ["uv_build>=0.12.10,<0.13.0"]
+build-backend = "uv_build"
