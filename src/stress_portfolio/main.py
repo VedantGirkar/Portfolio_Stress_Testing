@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from . import backtest, data, risk, selection, stress
+from . import backtest, data, optimization, risk, selection, stress
 from .config import ROOT, Settings
 
 
@@ -30,8 +30,9 @@ def new_run_dir(runs_dir: Path, now: datetime) -> Path:
 
 
 def run_risk(s: Settings, book: dict, bars: pd.DataFrame, price_cache: Path, start: str, end: str,
-             offline: bool, now: datetime) -> dict:
-    """Load the benchmark from the same price window and measure the risk of the funded book."""
+             offline: bool, now: datetime) -> tuple[dict, pd.Series]:
+    """Load the benchmark from the same price window and measure the risk of the funded book.
+    Returns the risk tables and the benchmark's adj_close on the session calendar."""
     if offline and not (price_cache / f"{start}_{end}" / f"{s.benchmark_ticker}.csv").exists():
         raise SystemExit(f"offline mode: {s.benchmark_ticker} is not cached; run `build` once without --offline")
     bench, failed = data.download_prices([s.benchmark_ticker], start, end, price_cache)
@@ -40,17 +41,18 @@ def run_risk(s: Settings, book: dict, bars: pd.DataFrame, price_cache: Path, sta
     bench, _ = data.clean_bars(data.drop_partial_session(bench, now))
     adj = data.wide(bars, "adj_close")
     cal = selection.session_calendar(adj)
-    return risk.risk_report(book["holdings"], adj.reindex(cal),
-                            data.wide(bench, "adj_close")[s.benchmark_ticker].reindex(cal), book["nav"], s)
+    bench_adj = data.wide(bench, "adj_close")[s.benchmark_ticker].reindex(cal)
+    return risk.risk_report(book["holdings"], adj.reindex(cal), bench_adj, book["nav"], s), bench_adj
 
 
-def run_stress_tests(s: Settings, book: dict, risk_tables: dict, end: str, offline: bool,
-                     now: datetime) -> dict:
-    """Load long history (holdings, benchmark, sector ETFs) in its own cache and stress the funded book."""
+def run_stress_tests(s: Settings, book: dict, risk_tables: dict, shortlist: pd.DataFrame, end: str, offline: bool,
+                     now: datetime) -> tuple[dict, pd.DataFrame]:
+    """Load long history (shortlist, benchmark, sector ETFs) in its own cache and stress the funded book.
+    Returns the stress tables and the wide adj_close history (reused by the optimizer)."""
     cache = s.data_dir / "raw" / "stress"
     folder = f"{s.stress_history_start}_{end}"
-    tickers = sorted({*book["holdings"].query("ticker != 'CASH'")["ticker"], s.benchmark_ticker,
-                      *dict(s.sector_etfs).values()})
+    tickers = sorted({*book["holdings"].query("ticker != 'CASH'")["ticker"], *shortlist["provider_ticker"],
+                      s.benchmark_ticker, *dict(s.sector_etfs).values()})
     if offline:
         tickers = [t for t in tickers if (cache / folder / f"{t}.csv").exists()]
     history, failed = data.download_prices(tickers, s.stress_history_start, end, cache, s.download_chunk_size)
@@ -60,8 +62,30 @@ def run_stress_tests(s: Settings, book: dict, risk_tables: dict, end: str, offli
     if not offline:
         data.prune_cache(cache, folder)
     history, _ = data.clean_bars(data.drop_partial_session(history, now))
-    tables = stress.run_stress(book["holdings"], risk_tables["risk_positions"], data.wide(history, "adj_close"), s)
+    wide = data.wide(history, "adj_close")
+    tables = stress.run_stress(book["holdings"], risk_tables["risk_positions"], wide, s)
     tables["stress_download_failures"] = failed  # these tickers fall back to proxies
+    return tables, wide
+
+
+def run_optimization(s: Settings, result: dict, picked: pd.DataFrame, bars: pd.DataFrame, book: dict,
+                     risk_tables: dict, history: pd.DataFrame, bench_adj: pd.Series) -> dict:
+    """Candidate allocations for 10/20/30 stocks from the shortlist, judged with one shared set of estimates."""
+    short = result["shortlist"]
+    adj = data.wide(bars, "adj_close")
+    adj = adj.reindex(selection.session_calendar(adj))
+    rets = risk.daily_returns(adj[short["provider_ticker"]], s.risk_lookback_sessions)
+    bench = (bench_adj / bench_adj.shift(1) - 1).reindex(rets.index)
+    est = optimization.estimates(rets, bench, s)
+    positions = risk_tables["risk_positions"]
+    riskiest = positions.groupby("sector")["risk_contribution_pct"].sum().idxmax()
+    scen, groups = stress.scenario_returns(short.set_index("provider_ticker")[["sector"]], history, est[2],
+                                           riskiest, s)
+    sel_returns = selection.window_returns(data.wide(picked, "adj_close"), s)  # same information as the selection
+    prices = data.wide(bars, "close").ffill().iloc[-1]  # latest valuation marks
+    tables = optimization.build_candidates(short, sel_returns, est, scen, groups, book["holdings"], prices, s)
+    tables["opt_estimates"]["window_start"], tables["opt_estimates"]["window_end"] = rets.index[0].date(), \
+        rets.index[-1].date()
     return tables
 
 
@@ -113,8 +137,11 @@ def run_select(s: Settings, offline: bool, now: datetime | None = None, fund: bo
     picked = bars if decision_date is None else bars.loc[bars["date"] <= decision_date]
     result = selection.run_selection(membership, picked, failures, s)
     book = backtest.fund_and_hold(result["core"], bars, decision_date, s) if fund else None
-    risk_tables = run_risk(s, book, bars, price_cache, start, end, offline, now) if fund else {}
-    stress_tables = run_stress_tests(s, book, risk_tables, end, offline, now) if fund else {}
+    risk_tables, stress_tables, opt_tables = {}, {}, {}
+    if fund:
+        risk_tables, bench_adj = run_risk(s, book, bars, price_cache, start, end, offline, now)
+        stress_tables, history = run_stress_tests(s, book, risk_tables, result["shortlist"], end, offline, now)
+        opt_tables = run_optimization(s, result, picked, bars, book, risk_tables, history, bench_adj)
 
     run_dir = new_run_dir(s.runs_dir, now)
     for name in ["eligibility", "sector_quotas", "shortlist", "core", "reserves"]:
@@ -125,7 +152,7 @@ def run_select(s: Settings, offline: bool, now: datetime | None = None, fund: bo
     if book:
         for name in ["orders", "holdings", "ledger", "nav", "cost_scenarios"]:
             book[name].to_csv(run_dir / f"{name}.csv", index=False)
-    for name, table in {**risk_tables, **stress_tables}.items():
+    for name, table in {**risk_tables, **stress_tables, **opt_tables}.items():
         table.to_csv(run_dir / f"{name}.csv", index=False)
     (run_dir / "settings.json").write_text(json.dumps(s.to_dict(), indent=2))
     meta = {
@@ -189,6 +216,18 @@ def run_select(s: Settings, offline: bool, now: datetime | None = None, fund: bo
                               "pnl_pct_nav": round(float(v["pnl_pct_nav"]), 4)} for k, v in worst.items()},
             "proxied_positions_total": int(sc["proxied_positions"].sum()),
         }
+        cand = opt_tables["opt_candidates"]
+        est_window = opt_tables["opt_estimates"].loc[0, ["window_start", "window_end"]].astype(str).tolist()
+        meta["optimization"] = {
+            "method": "cvxpy (CLARABEL) on heuristic 10/20/30-stock universes; convex optimum per universe only",
+            "estimation_window": est_window,
+            "expected_return": f"{s.expected_return_blend:.0%} historical mean + rest beta x {s.equity_risk_premium:.0%}",
+            "constraints": {"long_only": True, "cash_reserve": s.cash_reserve, "max_position": s.max_position_weight,
+                            "max_sector": s.max_sector_weight, "min_position": s.min_position_weight,
+                            "stress_loss_budget": s.stress_loss_budget},
+            "candidates": int(len(cand)),
+            "infeasible": cand.loc[cand["expected_return"].isna(), "candidate"].tolist(),
+        }
     else:
         meta["notes"].append("Target weights only; run `stress-portfolio build` for holdings, cash and NAV.")
     (run_dir / "metadata.json").write_text(json.dumps(meta, indent=2))
@@ -223,6 +262,9 @@ def main(argv: list[str] | None = None) -> None:
                          indent=2))
         print(json.dumps({k: v for k, v in meta["risk"].items() if k != "convention"}, indent=2))
         print(json.dumps(meta["stress"], indent=2))
+        cand = pd.read_csv(run_dir / "opt_candidates.csv")
+        print(cand[["candidate", "status", "expected_return", "volatility", "worst_train_loss",
+                    "worst_validation_loss", "est_cost_usd", "turnover"]].round(3).to_string(index=False))
 
 
 if __name__ == "__main__":

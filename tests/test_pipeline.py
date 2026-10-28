@@ -120,6 +120,15 @@ def test_build_funds_core_and_reconciles(tmp_path, offline_world):
     positions = pd.read_csv(run_dir / "stress_positions.csv")
     assert positions.groupby("scenario")["pnl_usd"].sum().round(6).to_dict() == \
         scenarios["pnl_usd"].dropna().round(6).to_dict()
+    cand = pd.read_csv(run_dir / "opt_candidates.csv").set_index("candidate")
+    assert cand.at["current_5", "est_cost_usd"] == 0 and cand.at["current_5", "trades"] == 0
+    weights = pd.read_csv(run_dir / "opt_weights.csv")
+    sums = weights.groupby("candidate")["weight"].sum()
+    assert (sums.drop("current_5") - 0.97).abs().max() < 1e-6  # every new candidate keeps the 3% cash reserve
+    assert (weights.groupby("candidate")["weight"].max() <= 0.25 + 1e-6).all()
+    solved = cand.loc[cand.index.str.startswith("stress_aware") & cand["expected_return"].notna()]
+    assert (solved["worst_train_loss"] <= 0.40 + 1e-6).all()
+    assert (pd.read_csv(run_dir / "opt_frontier.csv")["holding_count"].unique() == [5, 10]).all()
     assert set(pd.read_csv(run_dir / "stress_download_failures.csv")["ticker"]) == {"XLB", "XLC", "XLE", "XLF",
                                                                                   "XLI", "XLK", "XLP", "XLRE",
                                                                                   "XLU", "XLV", "XLY"}

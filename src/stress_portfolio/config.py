@@ -87,6 +87,17 @@ class Settings:
     combined_market_shock: float = -0.20  # plus combined_sector_shock in the riskiest held sector, compounded
     combined_sector_shock: float = -0.20
 
+    # Optimization (annual estimates from daily total returns; cash earns zero)
+    holding_counts: tuple[int, ...] = (10, 20, 30)  # stocks per candidate universe; sector cap = ceil(count / 5)
+    expected_return_blend: float = 0.5  # weight on the historical mean; the rest on CAPM (beta x premium)
+    equity_risk_premium: float = 0.05
+    risk_aversion: float = 4.0  # objective: return - risk_aversion / 2 x variance - trading cost
+    max_position_weight: float = 0.15  # of NAV
+    max_sector_weight: float = 0.30  # of NAV
+    min_position_weight: float = 0.01  # smaller positions are dropped and the problem re-solved
+    stress_loss_budget: float = 0.40  # stress-aware: every training scenario loses at most this share of NAV
+    frontier_points: int = 15
+
     # Hedge (decided at milestone 7; a full-strategy run must reject "undecided")
     hedge_method: str = "undecided"
 
@@ -94,8 +105,8 @@ class Settings:
         weights = self.weight_momentum + self.weight_low_downside + self.weight_low_drawdown
         if abs(weights - 1.0) > 1e-9:
             raise ValueError(f"score weights must sum to 1, got {weights}")
-        if self.core_size > self.shortlist_size:
-            raise ValueError("core_size cannot exceed shortlist_size")
+        if max(self.core_size, *self.holding_counts) > self.shortlist_size:
+            raise ValueError("core_size and holding_counts cannot exceed shortlist_size")
         if self.max_per_sector < 1:
             raise ValueError("max_per_sector must be at least 1")
         if self.min_sectors > self.core_size:

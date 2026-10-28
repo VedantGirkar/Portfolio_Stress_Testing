@@ -155,3 +155,43 @@ def stress_sector_attribution(sectors: pd.DataFrame) -> go.Figure:
     df = sectors.sort_values("pnl_usd")
     fig = px.bar(df, x="pnl_usd", y="sector", orientation="h", title="P&L by sector")
     return _tidy(fig.update_traces(marker_color="#ef4444").update_layout(xaxis_title="USD", yaxis_title=""))
+
+
+METHOD_COLORS = {"current": "#e2e8f0", "equal_weight": "#94a3b8", "min_variance": "#22c55e",
+                 "mean_variance": "#3b82f6", "stress_aware": "#ef4444"}
+
+
+def _candidate_markers(fig: go.Figure, cand: pd.DataFrame, current: pd.DataFrame, x: str) -> None:
+    for _, row in pd.concat([current, cand.loc[cand["method"] != "current"]]).dropna(subset=[x]).iterrows():
+        fig.add_scatter(x=[row[x]], y=[row["expected_return"]], mode="markers", name=row["candidate"],
+                        marker=dict(size=12, color=METHOD_COLORS[row["method"]],
+                                    symbol="star" if row["method"] == "current" else "circle",
+                                    line=dict(color="#0f172a", width=1)))
+
+
+def efficient_frontier(frontier: pd.DataFrame, cand: pd.DataFrame, current: pd.DataFrame) -> go.Figure:
+    fig = px.line(frontier.dropna(subset=["volatility"]), x="volatility", y="expected_return", markers=True,
+                  title="Efficient frontier (estimated, annual, before costs)")
+    fig.update_traces(name="frontier", showlegend=True, line_color="#64748b")
+    _candidate_markers(fig, cand, current, "volatility")
+    return _tidy(fig.update_layout(xaxis_tickformat=".0%", yaxis_tickformat=".0%", xaxis_title="volatility",
+                                   yaxis_title="expected return"), height=440)
+
+
+def stress_tradeoff(frontier: pd.DataFrame, cand: pd.DataFrame, current: pd.DataFrame, budget: float) -> go.Figure:
+    fig = px.line(frontier.dropna(subset=["worst_train_loss"]), x="worst_train_loss", y="expected_return",
+                  markers=True, title="Stress loss vs return (worst training scenario)")
+    fig.update_traces(name="frontier points", showlegend=True, line_color="#64748b")
+    _candidate_markers(fig, cand, current, "worst_train_loss")
+    fig.add_vline(x=budget, line_dash="dash", line_color="#ef4444", annotation_text=f"budget {budget:.0%}")
+    return _tidy(fig.update_layout(xaxis_tickformat=".0%", yaxis_tickformat=".0%", xaxis_title="worst loss",
+                                   yaxis_title="expected return"), height=440)
+
+
+def weights_compare(target: pd.DataFrame, current: pd.DataFrame, name: str) -> go.Figure:
+    df = pd.concat([target.assign(portfolio=name), current.assign(portfolio="current")])
+    order = df.groupby("ticker")["weight"].max().sort_values(ascending=False).index.tolist()
+    fig = px.bar(df, x="ticker", y="weight", color="portfolio", barmode="group", category_orders={"ticker": order},
+                 color_discrete_map={name: "#ef4444", "current": "#94a3b8"}, hover_data=["sector"],
+                 title=f"Target weights: {name} vs current (% of NAV)")
+    return _tidy(fig.update_layout(yaxis_tickformat=".0%", xaxis_title=""))

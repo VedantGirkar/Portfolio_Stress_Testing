@@ -11,7 +11,8 @@ SECTORS = ["Energy", "Financials", "Health Care", "Industrials", "Utilities"]
 
 def make_settings(tmp_path, **overrides) -> Settings:
     base = dict(shortlist_size=20, core_size=5, base_slots_per_sector=2, max_per_sector=2, min_sectors=3,
-                min_observations=300, min_median_dollar_volume=1e6, data_dir=tmp_path / "data",
+                min_observations=300, min_median_dollar_volume=1e6, holding_counts=(5, 10), max_position_weight=0.25,
+                data_dir=tmp_path / "data",
                 runs_dir=tmp_path / "runs")
     return Settings(**{**base, **overrides})
 

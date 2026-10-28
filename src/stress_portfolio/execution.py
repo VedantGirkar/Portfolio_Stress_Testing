@@ -19,7 +19,8 @@ def generate_orders(positions: dict[str, float], target_weights: pd.Series, deci
     tickers = sorted(set(positions) | set(target_weights.index))
     current = pd.Series(positions, dtype=float).reindex(tickers, fill_value=0.0)
     price = decision_prices.reindex(tickers)
-    target = np.floor(target_weights.reindex(tickers, fill_value=0.0) * nav / price)
+    # tiny epsilon: an unchanged target like 278.9999999 shares must not round down into a 1-share sell
+    target = np.floor(target_weights.reindex(tickers, fill_value=0.0) * nav / price + 1e-9)
     orders = pd.DataFrame({"ticker": tickers, "current_qty": current.values, "target_qty": target.values,
                            "decision_price": price.values})
     orders["order_qty"] = orders["target_qty"] - orders["current_qty"]

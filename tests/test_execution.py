@@ -36,3 +36,9 @@ def test_sells_fund_buys_and_bad_prices_are_rejected(tmp_path):
     f = fills.set_index("ticker")
     assert f.at["A", "status"] == "filled" and f.at["B", "status"] == "filled"  # sale proceeds pay for B
     assert f.at["C", "status"] == "rejected" and f.at["C", "commission"] == 0
+
+
+def test_unchanged_float_weights_do_not_trade():
+    nav, price = 1_002_903.3, 343.83
+    weight = 279 * price / nav  # the drifted weight read back from holdings
+    assert execution.generate_orders({"A": 279.0}, pd.Series({"A": weight}), pd.Series({"A": price}), nav).empty

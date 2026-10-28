@@ -74,9 +74,10 @@ def replay_events(stocks: pd.DataFrame, history: pd.DataFrame, betas: pd.Series,
     return defs, positions
 
 
-def hypothetical_shocks(stocks: pd.DataFrame, betas: pd.Series, variance_share: pd.Series,
+def hypothetical_shocks(stocks: pd.DataFrame, betas: pd.Series, combined_sector: str,
                         s: Settings) -> tuple[list, list]:
-    """Beta-scaled market shocks, single-sector shocks, and a compounded market-plus-sector shock."""
+    """Beta-scaled market shocks, single-sector shocks (one per sector in `stocks`), and a compounded
+    market-plus-sector shock in `combined_sector`."""
     defs, positions = [], []
 
     def add(name, label, shocks, source, note):
@@ -93,12 +94,23 @@ def hypothetical_shocks(stocks: pd.DataFrame, betas: pd.Series, variance_share: 
         shock = (stocks["sector"] == sector) * s.sector_shock
         add(f"sector_{sector}", f"{sector} {s.sector_shock:+.0%}", shock.astype(float), "sector shock",
             "this sector only, market flat")
-    riskiest = variance_share.groupby(stocks["sector"]).sum().idxmax()
-    sector_part = (stocks["sector"] == riskiest) * s.combined_sector_shock
+    sector_part = (stocks["sector"] == combined_sector) * s.combined_sector_shock
     combined = (1 + betas * m) * (1 + sector_part) - 1
-    add("combined", f"Market {m:+.0%} + {riskiest} {s.combined_sector_shock:+.0%}", combined,
-        "beta x market, compounded with sector", f"riskiest sector by variance share: {riskiest}")
+    add("combined", f"Market {m:+.0%} + {combined_sector} {s.combined_sector_shock:+.0%}", combined,
+        "beta x market, compounded with sector", f"riskiest sector of the current book: {combined_sector}")
     return defs, positions
+
+
+def scenario_returns(stocks: pd.DataFrame, history: pd.DataFrame, betas: pd.Series, combined_sector: str,
+                     s: Settings) -> tuple[pd.DataFrame, pd.Series]:
+    """Scenario x stock shock returns for any set of stocks (index = ticker, column sector), using the same
+    scenarios as the book's stress test, plus each scenario's train/validation group."""
+    unit = stocks[["sector"]].assign(market_value=1.0)
+    hist_defs, hist_pos = replay_events(unit, history, betas, s)
+    hypo_defs, hypo_pos = hypothetical_shocks(unit, betas, combined_sector, s)
+    matrix = pd.concat(hist_pos + hypo_pos).pivot(index="scenario", columns="ticker", values="shock_return")
+    groups = pd.DataFrame(hist_defs + hypo_defs).set_index("scenario")["group"]
+    return matrix, groups.reindex(matrix.index)
 
 
 def run_stress(holdings: pd.DataFrame, risk_positions: pd.DataFrame, history: pd.DataFrame,
@@ -110,7 +122,8 @@ def run_stress(holdings: pd.DataFrame, risk_positions: pd.DataFrame, history: pd
     betas, variance_share = rp["beta"].reindex(stocks.index), rp["risk_contribution_pct"].reindex(stocks.index)
 
     hist_defs, hist_pos = replay_events(stocks, history, betas, s)
-    hypo_defs, hypo_pos = hypothetical_shocks(stocks, betas, variance_share, s)
+    riskiest = variance_share.groupby(stocks["sector"]).sum().idxmax()
+    hypo_defs, hypo_pos = hypothetical_shocks(stocks, betas, riskiest, s)
     positions = pd.concat(hist_pos + hypo_pos, ignore_index=True)
     scenarios = pd.DataFrame(hist_defs + hypo_defs)
 

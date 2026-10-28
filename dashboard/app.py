@@ -15,7 +15,6 @@ from stress_portfolio.config import Settings  # noqa: E402
 
 RUNS_DIR = Path(os.environ.get("STRESS_PORTFOLIO_RUNS_DIR", Settings().runs_dir))
 COMING = {
-    "Optimization": "milestone 5 — efficient frontier and candidate allocations",
     "Rebalancing": "milestone 6 — proposed orders and costs",
     "Hedging": "milestones 7–8 — delta or gamma hedge (method not chosen yet)",
     "Backtest": "milestones 6 and 9 — walk-forward results and benchmarks",
@@ -37,7 +36,8 @@ def load_run(path: str) -> dict:
     tables = {n: pd.read_csv(p / f"{n}.csv") for n in ["core", "reserves", "shortlist", "sector_quotas", "eligibility"]}
     for n in ["holdings", "orders", "nav", "cost_scenarios", "risk_var", "risk_summary", "risk_positions",
               "risk_sectors", "risk_correlation", "risk_series", "var_backtest", "var_backtest_summary",
-              "stress_scenarios", "stress_positions", "stress_sectors"]:
+              "stress_scenarios", "stress_positions", "stress_sectors", "opt_candidates", "opt_weights",
+              "opt_frontier", "opt_estimates"]:
         # only in `build` runs; risk tables only in builds made after milestone 3
         if (p / f"{n}.csv").exists():
             tables[n] = pd.read_csv(p / f"{n}.csv")
@@ -74,7 +74,7 @@ st.sidebar.markdown(
 )
 st.sidebar.caption(meta["membership"]["limitation"])
 
-tabs = st.tabs(["Overview", "Selection", "Risk", "Stress", *COMING])
+tabs = st.tabs(["Overview", "Selection", "Risk", "Stress", "Optimization", *COMING])
 
 with tabs[0]:
     core, reserves, short = r["core"], r["reserves"], r["shortlist"]
@@ -269,6 +269,60 @@ with tabs[3]:
         st.caption("Source shows where each move came from: the stock's own prices, its sector ETF (stock not yet "
                    "listed), or beta x SPY. Proxies can overstate or understate a stock's real move.")
 
-for tab, (name, when) in zip(tabs[4:], COMING.items()):
+with tabs[4]:
+    if "opt_candidates" not in r:
+        st.info("No optimization results in this run. Create a new run with `uv run stress-portfolio build`.")
+    else:
+        om, cand, wts = meta["optimization"], r["opt_candidates"], r["opt_weights"]
+        con = om["constraints"]
+        st.caption(
+            f"Candidate portfolios built from the shortlist and judged with one shared set of estimates "
+            f"({om['estimation_window'][0]} to {om['estimation_window'][1]}). Expected return = {om['expected_return']}; "
+            "these are estimates, not forecasts. Stocks for each universe size come from the selection heuristic; "
+            "cvxpy then sets the weights, so each result is the best for its own universe, not a global optimum. "
+            "Proposals only: nothing here trades (rebalancing decisions arrive in milestone 6).")
+        c = st.columns(4)
+        c[0].metric("Candidates", len(cand) - 1, f"{len(om['infeasible'])} infeasible", delta_color="off")
+        c[1].metric("Stress budget", f"{con['stress_loss_budget']:.0%}", "max training-scenario loss",
+                    delta_color="off")
+        c[2].metric("Position / sector cap", f"{con['max_position']:.0%} / {con['max_sector']:.0%}", "of NAV",
+                    delta_color="off")
+        c[3].metric("Cash reserve", f"{con['cash_reserve']:.0%}", f"min position {con['min_position']:.0%}",
+                    delta_color="off")
+        sizes = sorted(int(k) for k in r["opt_frontier"]["holding_count"].unique())
+        k = st.radio("Universe size (stocks the optimizer may use)", sizes, horizontal=True)
+        current = cand.loc[cand["method"] == "current"]
+        left, right = st.columns(2)
+        left.plotly_chart(charts.efficient_frontier(r["opt_frontier"].query("holding_count == @k"),
+                                                    cand.query("holding_count == @k"), current), width="stretch")
+        right.plotly_chart(charts.stress_tradeoff(r["opt_frontier"].query("holding_count == @k"),
+                                                  cand.query("holding_count == @k"), current,
+                                                  con["stress_loss_budget"]), width="stretch")
+        st.caption("Frontier points: lowest estimated volatility for each target return, before trading costs and "
+                   "without the stress budget (approximate: 15 points). The right chart is a separate trade-off: "
+                   "the same points' worst training-scenario loss against estimated return.")
+
+        st.subheader("All candidates")
+        st.dataframe(
+            cand[["candidate", "status", "holdings", "expected_return", "volatility", "sharpe", "worst_train_loss",
+                  "worst_train_scenario", "worst_validation_loss", "worst_validation_scenario", "trades",
+                  "est_cost_usd", "turnover"]],
+            hide_index=True, width="stretch",
+            column_config={c: st.column_config.NumberColumn(format="percent") for c in
+                           ["expected_return", "volatility", "worst_train_loss", "worst_validation_loss", "turnover"]}
+            | {"est_cost_usd": st.column_config.NumberColumn("est. cost", format="dollar"),
+               "sharpe": st.column_config.NumberColumn("return / vol", format="%.2f")})
+        st.caption("Training losses are what the stress-aware optimizer was allowed to see; validation losses are an "
+                   "out-of-sample check it never used. Estimated cost uses the full cost model on whole-share orders "
+                   "from today's holdings. 'Infeasible' means no weights satisfy every limit.")
+
+        st.subheader("Compare weights")
+        solved = [c for c in cand["candidate"] if c in set(wts["candidate"]) and not c.startswith("current")]
+        pick = st.selectbox("Candidate", solved, index=solved.index("stress_aware_20") if "stress_aware_20" in solved
+                            else 0)
+        now_w = wts.loc[wts["candidate"].str.startswith("current")]
+        st.plotly_chart(charts.weights_compare(wts.loc[wts["candidate"] == pick], now_w, pick), width="stretch")
+
+for tab, (name, when) in zip(tabs[5:], COMING.items()):
     with tab:
         st.info(f"**{name}** is not built yet — arrives in {when}.")
