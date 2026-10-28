@@ -1,0 +1,66 @@
+"""Project settings: one place for every research assumption."""
+
+from dataclasses import asdict, dataclass
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+@dataclass(frozen=True)
+class Settings:
+    # Universe and data
+    membership_url: str = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+    history_calendar_days: int = 1100  # enough sessions for min_observations plus holidays
+    download_chunk_size: int = 75
+    data_dir: Path = ROOT / "data"
+    runs_dir: Path = ROOT / "outputs" / "runs"
+
+    # Eligibility (sessions are trading days)
+    min_observations: int = 504
+    feature_window_prices: int = 253  # 252 daily returns
+    max_staleness_sessions: int = 0  # latest price must be on the cutoff session
+    liquidity_window_sessions: int = 63
+    min_median_dollar_volume: float = 25_000_000.0
+
+    # Shortlist
+    shortlist_size: int = 100
+    base_slots_per_sector: int = 5
+
+    # Features
+    momentum_lookback_sessions: int = 126
+    momentum_skip_sessions: int = 21
+    trading_days_per_year: int = 252
+
+    # Investment score weights (on 0-1 percentiles; higher is better)
+    weight_momentum: float = 0.50
+    weight_low_downside: float = 0.30
+    weight_low_drawdown: float = 0.20
+
+    # Core selection
+    core_size: int = 10
+    correlation_penalty: float = 0.5
+    max_per_sector: int = 2
+    min_sectors: int = 5
+
+    # Hedge (decided at milestone 7; a full-strategy run must reject "undecided")
+    hedge_method: str = "undecided"
+
+    def __post_init__(self) -> None:
+        weights = self.weight_momentum + self.weight_low_downside + self.weight_low_drawdown
+        if abs(weights - 1.0) > 1e-9:
+            raise ValueError(f"score weights must sum to 1, got {weights}")
+        if self.core_size > self.shortlist_size:
+            raise ValueError("core_size cannot exceed shortlist_size")
+        if self.max_per_sector < 1:
+            raise ValueError("max_per_sector must be at least 1")
+        if self.min_sectors > self.core_size:
+            raise ValueError("min_sectors cannot exceed core_size")
+        if self.min_observations < self.feature_window_prices:
+            raise ValueError("min_observations must cover the feature window")
+        if self.momentum_lookback_sessions + self.momentum_skip_sessions >= self.feature_window_prices:
+            raise ValueError("momentum window must fit inside the feature window")
+        if self.hedge_method not in {"undecided", "delta", "gamma"}:
+            raise ValueError(f"unknown hedge_method {self.hedge_method!r}")
+
+    def to_dict(self) -> dict:
+        return {k: str(v) if isinstance(v, Path) else v for k, v in asdict(self).items()}

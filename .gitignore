@@ -8,3 +8,7 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Data caches and run outputs
+data/
+outputs/
