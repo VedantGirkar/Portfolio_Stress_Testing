@@ -195,3 +195,21 @@ def weights_compare(target: pd.DataFrame, current: pd.DataFrame, name: str) -> g
                  color_discrete_map={name: "#ef4444", "current": "#94a3b8"}, hover_data=["sector"],
                  title=f"Target weights: {name} vs current (% of NAV)")
     return _tidy(fig.update_layout(yaxis_tickformat=".0%", xaxis_title=""))
+
+
+def bt_growth(nav: pd.DataFrame) -> go.Figure:
+    fig = px.line(nav, x="date", y="nav", color="strategy", log_y=True, title="NAV over the backtest (log scale)")
+    fig.update_traces(selector={"name": "SPY (reference)"}, line_dash="dot")
+    return _tidy(fig.update_layout(yaxis_title="USD", xaxis_title=""), height=460)
+
+
+def bt_drawdowns(nav: pd.DataFrame) -> go.Figure:
+    df = nav.assign(drawdown=nav.groupby("strategy")["nav"].transform(lambda v: v / v.cummax() - 1))
+    fig = px.line(df, x="date", y="drawdown", color="strategy", title="Drawdown from peak")
+    return _tidy(fig.update_layout(yaxis_tickformat=".0%", yaxis_title="", xaxis_title=""))
+
+
+def bt_holdings(nav: pd.DataFrame) -> go.Figure:
+    fig = px.line(nav.dropna(subset=["holdings"]), x="date", y="holdings", color="strategy", line_shape="hv",
+                  title="Stocks held")
+    return _tidy(fig.update_layout(yaxis_title="", xaxis_title=""))

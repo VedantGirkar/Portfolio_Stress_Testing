@@ -105,3 +105,10 @@ def test_clean_bars_policy_and_report():
     assert np.isnan(clean["close"].iloc[1])  # nonpositive price became missing, not filled
     row = report.iloc[0]
     assert (row["duplicate_rows"], row["nonpositive_price_rows"], row["zero_volume_days"]) == (1, 1, 1)
+
+
+def test_future_split_factor():
+    dates = pd.to_datetime(["2021-07-19", "2021-07-20", "2024-06-07", "2024-06-10", "2024-06-11"])
+    bars = pd.DataFrame({"date": dates, "ticker": "N", "splits": [0, 4.0, 0, 10.0, 0]})
+    f = data.future_split_factor(bars)["N"].tolist()
+    assert f == [40.0, 10.0, 10.0, 1.0, 1.0]  # the split day itself already trades post-split

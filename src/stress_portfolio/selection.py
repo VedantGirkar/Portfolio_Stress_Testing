@@ -99,7 +99,12 @@ def build_shortlist(eligible: pd.DataFrame, quotas: pd.DataFrame, s: Settings) -
     """Most liquid companies per sector up to the quota, then within-shortlist percentiles and score."""
     q = quotas.set_index("sector")["quota"]
     ranked = eligible.sort_values(["sector", "median_dollar_volume", "ticker"], ascending=[True, False, True])
-    short = ranked.loc[ranked.groupby("sector").cumcount() < ranked["sector"].map(q)].reset_index(drop=True)
+    return score(ranked.loc[ranked.groupby("sector").cumcount() < ranked["sector"].map(q)].reset_index(drop=True), s)
+
+
+def score(short: pd.DataFrame, s: Settings) -> pd.DataFrame:
+    """Within-shortlist percentiles (higher is better) and the investment score."""
+    short = short.copy()
     short["momentum_pct"] = short["momentum"].rank(pct=True)
     short["low_downside_pct"] = short["downside_dev_annual"].rank(ascending=False, pct=True)
     short["low_drawdown_pct"] = short["max_drawdown"].rank(ascending=False, pct=True)

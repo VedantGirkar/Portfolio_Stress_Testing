@@ -27,10 +27,13 @@ def generate_orders(positions: dict[str, float], target_weights: pd.Series, deci
     return orders.loc[orders["order_qty"].ne(0)].reset_index(drop=True)
 
 
-def execute(orders: pd.DataFrame, open_prices: pd.Series, cash: float, s: Settings) -> pd.DataFrame:
-    """Fill at the session open plus costs: sells first, then buys trimmed so cash never goes negative."""
+def execute(orders: pd.DataFrame, open_prices: pd.Series, cash: float, s: Settings,
+            split_factor: pd.Series | None = None) -> pd.DataFrame:
+    """Fill at the session open plus costs: sells first, then buys trimmed so cash never goes negative.
+    split_factor (per ticker, default 1) converts split-adjusted shares to real shares for commissions."""
     df = orders[["ticker", "order_qty"]].copy()
     df["ref_price"] = open_prices.reindex(df["ticker"]).values
+    df["split_factor"] = 1.0 if split_factor is None else split_factor.reindex(df["ticker"]).fillna(1.0).values
     bad = df["ref_price"].isna() | (df["ref_price"] <= 0) | df["order_qty"].isna()
     df["filled_qty"] = df["order_qty"].where(~bad, 0.0)
     df["status"] = np.where(bad, "rejected", "filled")
@@ -51,7 +54,7 @@ def execute(orders: pd.DataFrame, open_prices: pd.Series, cash: float, s: Settin
         empty = buys & (df["filled_qty"] == 0)
         df.loc[empty, ["status", "reason"]] = ["rejected", "insufficient cash"]
 
-    costs = stock_costs(df["filled_qty"], df["ref_price"].fillna(0.0), s)
+    costs = stock_costs(df["filled_qty"], df["ref_price"].fillna(0.0), s, split_factor=df["split_factor"])
     return pd.concat([df, costs], axis=1)[FILL_COLUMNS]
 
 
@@ -59,5 +62,5 @@ def _cash_need(rows: pd.DataFrame, s: Settings) -> float:
     """Cash consumed by these fills (negative for sells): quantity x fill price + commission."""
     if rows.empty:
         return 0.0
-    c = stock_costs(rows["filled_qty"], rows["ref_price"], s)
+    c = stock_costs(rows["filled_qty"], rows["ref_price"], s, split_factor=rows["split_factor"])
     return float((rows["filled_qty"] * c["fill_price"] + c["commission"]).sum())

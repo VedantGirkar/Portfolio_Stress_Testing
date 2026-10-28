@@ -49,23 +49,73 @@ def run_stress_tests(s: Settings, book: dict, risk_tables: dict, shortlist: pd.D
                      now: datetime) -> tuple[dict, pd.DataFrame]:
     """Load long history (shortlist, benchmark, sector ETFs) in its own cache and stress the funded book.
     Returns the stress tables and the wide adj_close history (reused by the optimizer)."""
+    tickers = {*book["holdings"].query("ticker != 'CASH'")["ticker"], *shortlist["provider_ticker"]}
+    wide, failed = load_long_history(s, tickers, end, offline, now)
+    tables = stress.run_stress(book["holdings"], risk_tables["risk_positions"], wide, s)
+    tables["stress_download_failures"] = failed  # these tickers fall back to proxies
+    return tables, wide
+
+
+def load_long_history(s: Settings, tickers, end: str, offline: bool, now: datetime) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Wide adj_close since stress_history_start for `tickers`, the benchmark and the sector ETFs, in its own
+    cache. Missing stocks are returned as failures (stress replays fall back to proxies for them)."""
     cache = s.data_dir / "raw" / "stress"
     folder = f"{s.stress_history_start}_{end}"
-    tickers = sorted({*book["holdings"].query("ticker != 'CASH'")["ticker"], *shortlist["provider_ticker"],
-                      s.benchmark_ticker, *dict(s.sector_etfs).values()})
+    tickers = sorted({*tickers, s.benchmark_ticker, *dict(s.sector_etfs).values()})
     if offline:
         tickers = [t for t in tickers if (cache / folder / f"{t}.csv").exists()]
     history, failed = data.download_prices(tickers, s.stress_history_start, end, cache, s.download_chunk_size)
     if history.empty or s.benchmark_ticker not in set(history["ticker"]):
-        how = "run `build` once without --offline" if offline else "rerun"
-        raise SystemExit(f"stress history for {s.benchmark_ticker} is not available; {how}")
+        how = "run once without --offline" if offline else "rerun"
+        raise SystemExit(f"long history for {s.benchmark_ticker} is not available; {how}")
     if not offline:
         data.prune_cache(cache, folder)
     history, _ = data.clean_bars(data.drop_partial_session(history, now))
-    wide = data.wide(history, "adj_close")
-    tables = stress.run_stress(book["holdings"], risk_tables["risk_positions"], wide, s)
-    tables["stress_download_failures"] = failed  # these tickers fall back to proxies
-    return tables, wide
+    return data.wide(history, "adj_close"), failed
+
+
+def get_membership(s: Settings, offline: bool, now: datetime) -> tuple[pd.DataFrame, dict]:
+    path = s.data_dir / "raw" / "membership.csv"
+    if offline:
+        return data.load_membership(path)
+    membership, meta = data.fetch_membership(s.membership_url, now)
+    data.save_membership(membership, meta, path)
+    return membership, meta
+
+
+def price_window(cache: Path, start: str, offline: bool, now: datetime) -> tuple[str, str]:
+    """(start, end) of the price request. Offline reuses the newest cached window; online ends after today's
+    session only once it has settled (yfinance end is exclusive), so a partial bar is never cached."""
+    if offline:
+        caches = sorted(p.name for p in cache.glob("*_*") if p.is_dir())
+        if not caches:
+            raise SystemExit(f"offline mode: no cached prices in {cache}; run once without --offline")
+        return tuple(caches[-1].split("_"))
+    settled = now.astimezone(data.NY).time() >= data.MARKET_CLOSE_SETTLED
+    return start, (now.date() + timedelta(days=1 if settled else 0)).isoformat()
+
+
+def load_prices(s: Settings, tickers: list[str], cache: Path, start: str, end: str, offline: bool,
+                now: datetime) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Clean bars, failures and a quality report. Stops when too many tickers have no prices."""
+    if offline:
+        cached = {p.stem for p in (cache / f"{start}_{end}").glob("*.csv")}
+        bars, failures = data.download_prices([t for t in tickers if t in cached], start, end, cache,
+                                              s.download_chunk_size)
+        failures = pd.concat([failures, pd.DataFrame(
+            {"ticker": sorted(set(tickers) - cached), "reason": "not in offline cache"})], ignore_index=True)
+    else:
+        bars, failures = data.download_prices(tickers, start, end, cache, s.download_chunk_size)
+    share = len(failures) / len(tickers)
+    if share > s.max_download_failure_share:
+        retry = "run once without --offline" if offline else "rerun to fetch only the missing tickers"
+        raise SystemExit(f"{len(failures)} of {len(tickers)} tickers have no prices ({share:.1%}), above the "
+                         f"{s.max_download_failure_share:.0%} limit; {retry}. "
+                         f"First failures: {failures['ticker'].head(5).tolist()}")
+    if not offline:
+        data.prune_cache(cache, f"{start}_{end}")
+    bars, quality = data.clean_bars(data.drop_partial_session(bars, now))
+    return bars, failures, quality
 
 
 def run_optimization(s: Settings, result: dict, picked: pd.DataFrame, bars: pd.DataFrame, book: dict,
@@ -92,43 +142,12 @@ def run_optimization(s: Settings, result: dict, picked: pd.DataFrame, bars: pd.D
 def run_select(s: Settings, offline: bool, now: datetime | None = None, fund: bool = False) -> Path:
     """Selection run; with fund=True, select as of the prior session and buy the core at the next open."""
     now = now or datetime.now(data.NY)
-    raw = s.data_dir / "raw"
-    membership_path = raw / "membership.csv"
-    price_cache = raw / "prices"
-
-    if offline:
-        membership, member_meta = data.load_membership(membership_path)
-        caches = sorted(p.name for p in price_cache.glob("*_*") if p.is_dir())
-        if not caches:
-            raise SystemExit(f"offline mode: no cached prices in {price_cache}; run once without --offline")
-        start, end = caches[-1].split("_")
-    else:
-        membership, member_meta = data.fetch_membership(s.membership_url, now)
-        data.save_membership(membership, member_meta, membership_path)
-        # yfinance end is exclusive; exclude today until its bar has settled so a partial bar is never cached
-        settled = now.astimezone(data.NY).time() >= data.MARKET_CLOSE_SETTLED
-        end = (now.date() + timedelta(days=1 if settled else 0)).isoformat()
-        start = (now.date() - timedelta(days=s.history_calendar_days)).isoformat()
-
-    tickers = membership["provider_ticker"].tolist()
-    if offline:
-        cached = {p.stem for p in (price_cache / f"{start}_{end}").glob("*.csv")}
-        tickers_to_load = [t for t in tickers if t in cached]
-        bars, failures = data.download_prices(tickers_to_load, start, end, price_cache, s.download_chunk_size)
-        failures = pd.concat([failures, pd.DataFrame(
-            {"ticker": sorted(set(tickers) - cached), "reason": "not in offline cache"})], ignore_index=True)
-    else:
-        bars, failures = data.download_prices(tickers, start, end, price_cache, s.download_chunk_size)
-    share = len(failures) / len(tickers)
-    if share > s.max_download_failure_share:
-        retry = "run once without --offline" if offline else "rerun to fetch only the missing tickers"
-        raise SystemExit(f"{len(failures)} of {len(tickers)} tickers have no prices ({share:.1%}), above the "
-                         f"{s.max_download_failure_share:.0%} limit; {retry}. "
-                         f"First failures: {failures['ticker'].head(5).tolist()}")
-    if not offline:
-        data.prune_cache(price_cache, f"{start}_{end}")
-    bars = data.drop_partial_session(bars, now)
-    bars, quality = data.clean_bars(bars)
+    price_cache = s.data_dir / "raw" / "prices"
+    membership, member_meta = get_membership(s, offline, now)
+    start, end = price_window(price_cache, (now.date() - timedelta(days=s.history_calendar_days)).isoformat(),
+                              offline, now)
+    bars, failures, quality = load_prices(s, membership["provider_ticker"].tolist(), price_cache, start, end,
+                                          offline, now)
 
     decision_date = None
     if fund:
@@ -234,6 +253,53 @@ def run_select(s: Settings, offline: bool, now: datetime | None = None, fund: bo
     return run_dir
 
 
+def run_backtest_cmd(s: Settings, offline: bool, now: datetime | None = None) -> Path:
+    """Walk-forward backtest from backtest_start to the latest session; writes a `backtest` run."""
+    now = now or datetime.now(data.NY)
+    cache = s.data_dir / "raw" / "backtest"
+    membership, member_meta = get_membership(s, offline, now)
+    start, end = price_window(cache, s.backtest_history_start, offline, now)
+    members = membership["provider_ticker"].tolist()
+    bars, failures, quality = load_prices(s, members + [s.benchmark_ticker], cache, start, end, offline, now)
+    if s.benchmark_ticker in set(failures["ticker"]):
+        raise SystemExit(f"benchmark {s.benchmark_ticker} has no prices; rerun")
+    adj = data.wide(bars, "adj_close")
+    t0 = selection.session_calendar(adj)
+    t0 = t0[t0 < pd.Timestamp(s.backtest_start)][-1]
+    shortlist = selection.run_selection(membership, bars.loc[bars["date"] <= t0], failures, s)["shortlist"]
+    history, hist_failed = load_long_history(s, shortlist["provider_ticker"], end, offline, now)
+    out = backtest.run_backtest(membership, bars, history, s)
+
+    run_dir = new_run_dir(s.runs_dir, now)
+    for name in ["bt_nav", "bt_trades", "bt_decisions", "bt_summary", "bt_initial_core", "bt_dropped"]:
+        out[name].to_csv(run_dir / f"{name}.csv", index=False)
+    failures.to_csv(run_dir / "download_failures.csv", index=False)
+    quality.to_csv(run_dir / "data_quality.csv", index=False)
+    (run_dir / "settings.json").write_text(json.dumps(s.to_dict(), indent=2))
+    meta = {
+        "run_id": run_dir.name, "workflow": "backtest", "created_at": now.isoformat(timespec="seconds"),
+        "git_revision": git_revision(), "data_mode": "offline cache" if offline else "live download",
+        "label": backtest.BIAS_LABEL,
+        "start_decision": str(out["start"].date()), "end": str(out["bt_nav"]["date"].max().date()),
+        "reviews": out["reviews"], "strategies": list(backtest.STRATEGIES),
+        "policy": {"schedule": "last session of each completed quarter; orders fill at the next open",
+                   "stress_aware": f"switch if after-cost utility gain >= {s.rebalance_min_improvement:.2%}/yr or the "
+                                   f"book breaks a position, sector or stress limit by more than {s.rebalance_drift_band:.0%} "
+                                   "(scenarios known by the review)",
+                   "equal_weight": "reset the starting core to equal weights every quarter",
+                   "min_variance": f"minimum variance over a {s.backtest_universe_size}-stock universe every quarter",
+                   "buy_and_hold": "starting core, never traded again"},
+        "universe": "starting 100-stock shortlist fixed for the whole backtest, re-scored at each review",
+        "membership": member_meta, "event_order": list(backtest.EVENT_ORDER),
+        "long_history_failures": hist_failed["ticker"].tolist(),
+        "notes": ["Hedge reviews are not applicable until the hedge method is chosen (milestone 7).",
+                  "Commissions are charged on real shares (split-adjusted shares divided by later splits).",
+                  "Gross CAGR adds total costs back to the final NAV and ignores their compounding."],
+    }
+    (run_dir / "metadata.json").write_text(json.dumps(meta, indent=2))
+    return run_dir
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         prog="stress-portfolio",
@@ -242,14 +308,20 @@ def main(argv: list[str] | None = None) -> None:
     sub = parser.add_subparsers(dest="command")
     sel = sub.add_parser("select", help="build the 100-stock shortlist and the 10-stock core")
     build = sub.add_parser("build", help="select as of the prior session, buy the core at the next open, value it")
-    for p in (sel, build):
+    bt = sub.add_parser("backtest", help="walk-forward test of the strategies from backtest_start to today")
+    for p in (sel, build, bt):
         p.add_argument("--offline", action="store_true", help="use saved membership and cached prices only")
     args = parser.parse_args(argv)
 
-    if args.command not in {"select", "build"}:
+    if args.command not in {"select", "build", "backtest"}:
         parser.print_help()
         return
     s = Settings()
+    if args.command == "backtest":
+        run_dir = run_backtest_cmd(s, args.offline)
+        print(f"run saved to {run_dir}\n{backtest.BIAS_LABEL}")
+        print(pd.read_csv(run_dir / "bt_summary.csv").round(4).to_string(index=False))
+        return
     run_dir = run_select(s, args.offline, fund=args.command == "build")
     meta = json.loads((run_dir / "metadata.json").read_text())
     print(f"run saved to {run_dir}")

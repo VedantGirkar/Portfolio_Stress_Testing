@@ -98,6 +98,14 @@ class Settings:
     stress_loss_budget: float = 0.40  # stress-aware: every training scenario loses at most this share of NAV
     frontier_points: int = 15
 
+    # Rebalancing and backtest (equity-only until the hedge milestone; today's constituents, so survivorship-biased)
+    backtest_start: str = "2016-01-01"  # first decision is the last session before this date
+    backtest_history_start: str = "2013-01-01"  # enough sessions for eligibility at the start
+    backtest_universe_size: int = 20  # stocks the optimized strategies may use at each review
+    backtest_estimation_sessions: int = 756  # about 3 years of returns for each review's estimates
+    rebalance_min_improvement: float = 0.005  # annual utility gain after costs needed to switch
+    rebalance_drift_band: float = 0.02  # a limit only counts as broken once drift passes it by this much
+
     # Hedge (decided at milestone 7; a full-strategy run must reject "undecided")
     hedge_method: str = "undecided"
 

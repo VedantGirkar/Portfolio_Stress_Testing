@@ -11,11 +11,13 @@ from .config import Settings
 SCENARIOS = {"low": 0.5, "base": 1.0, "high": 2.0}
 
 
-def stock_costs(quantity: pd.Series, ref_price: pd.Series, s: Settings, scenario: str | None = None) -> pd.DataFrame:
+def stock_costs(quantity: pd.Series, ref_price: pd.Series, s: Settings, scenario: str | None = None,
+                split_factor=1.0) -> pd.DataFrame:
     """Itemized costs for signed share quantities (+ buy, - sell) against a reference price.
 
     fill_price = ref * (1 +/- (half_spread + slippage)); spread_cost and slippage_cost are the
-    implicit dollars inside that price; commission = max(per-share charge, per-order minimum).
+    implicit dollars inside that price; commission = max(per-share charge, per-order minimum), charged
+    on real shares: split-adjusted quantity / split_factor (the product of splits after the trade date).
     """
     mult = SCENARIOS[scenario or s.cost_scenario]
     qty = quantity.astype(float)
@@ -23,7 +25,7 @@ def stock_costs(quantity: pd.Series, ref_price: pd.Series, s: Settings, scenario
     shares = qty.abs()
     spread = ref_price * s.half_spread_bps * mult / 1e4
     slip = ref_price * s.slippage_bps * mult / 1e4
-    commission = np.maximum(shares * s.commission_per_share, s.min_commission_per_order) * mult
+    commission = np.maximum(shares / split_factor * s.commission_per_share, s.min_commission_per_order) * mult
     out = pd.DataFrame({
         "fill_price": ref_price + side * (spread + slip),
         "commission": commission.where(shares > 0, 0.0),

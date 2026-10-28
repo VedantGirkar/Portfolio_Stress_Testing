@@ -14,15 +14,24 @@ from dashboard import charts  # noqa: E402
 from stress_portfolio.config import Settings  # noqa: E402
 
 RUNS_DIR = Path(os.environ.get("STRESS_PORTFOLIO_RUNS_DIR", Settings().runs_dir))
-COMING = {
-    "Rebalancing": "milestone 6 — proposed orders and costs",
-    "Hedging": "milestones 7–8 — delta or gamma hedge (method not chosen yet)",
-    "Backtest": "milestones 6 and 9 — walk-forward results and benchmarks",
-}
+HEDGING_PENDING = "milestones 7–8 — delta or gamma hedge (method not chosen yet)"
 TABLE_COLS = ["ticker", "company", "sector", "investment_score", "momentum", "downside_dev_annual",
               "max_drawdown", "median_dollar_volume", "reason"]
 
 st.set_page_config(page_title="Stress Portfolio", layout="wide")
+
+
+def backtest_runs() -> list[Path]:
+    return sorted((p for p in RUNS_DIR.glob("*") if (p / "bt_summary.csv").exists()), reverse=True)
+
+
+@st.cache_data(max_entries=8)
+def load_backtest(path: str) -> dict:
+    p = Path(path)
+    tables = {n: pd.read_csv(p / f"{n}.csv", parse_dates=["date"] if n in ("bt_nav", "bt_decisions") else None)
+              for n in ["bt_nav", "bt_trades", "bt_decisions", "bt_summary", "bt_initial_core", "bt_dropped"]}
+    tables["meta"] = json.loads((p / "metadata.json").read_text())
+    return tables
 
 
 def selection_runs() -> list[Path]:
@@ -73,8 +82,11 @@ st.sidebar.markdown(
     f"**Code:** {meta.get('git_revision') or 'unknown'}"
 )
 st.sidebar.caption(meta["membership"]["limitation"])
+bt_dirs = backtest_runs()
+bt_run = st.sidebar.selectbox("Backtest run", bt_dirs, format_func=lambda p: p.name) if bt_dirs else None
+bt = load_backtest(str(bt_run)) if bt_run else None
 
-tabs = st.tabs(["Overview", "Selection", "Risk", "Stress", "Optimization", *COMING])
+tabs = st.tabs(["Overview", "Selection", "Risk", "Stress", "Optimization", "Rebalancing", "Hedging", "Backtest"])
 
 with tabs[0]:
     core, reserves, short = r["core"], r["reserves"], r["shortlist"]
@@ -326,6 +338,64 @@ with tabs[4]:
         now_w = wts.loc[wts["candidate"].str.startswith("current")]
         st.plotly_chart(charts.weights_compare(wts.loc[wts["candidate"] == pick], now_w, pick), width="stretch")
 
-for tab, (name, when) in zip(tabs[5:], COMING.items()):
-    with tab:
-        st.info(f"**{name}** is not built yet — arrives in {when}.")
+NO_BACKTEST = "No backtest runs yet. Create one with `uv run stress-portfolio backtest`."
+
+with tabs[5]:
+    if bt is None:
+        st.info(NO_BACKTEST)
+    else:
+        bm, dec = bt["meta"], bt["bt_decisions"]
+        st.warning(f"Results are {bm['label']}.", title="Preliminary backtest", icon=":material/warning:")
+        st.caption(f"Quarterly reviews from {bm['start_decision']} to {bm['end']} ({bm['reviews']} reviews). "
+                   f"{bm['policy']['schedule'].capitalize()}. Stress-aware rule: {bm['policy']['stress_aware']}.")
+        strategy = st.segmented_control("Strategy", ["stress_aware", "min_variance", "equal_weight"],
+                                        default="stress_aware", required=True)
+        log = dec.loc[dec["strategy"] == strategy]
+        c = st.columns(3)
+        c[0].metric("Reviews", len(log))
+        c[1].metric("Rebalanced", int((log["action"] == "rebalance").sum()))
+        c[2].metric("Held", int((log["action"] == "hold").sum()))
+        cols = [c for c in ["date", "action", "reason", "improvement", "cost_usd", "breaches", "holdings_before",
+                            "holdings_after", "hedge_review"] if c in log]
+        st.dataframe(log[cols], hide_index=True, alt=f"Review-by-review decisions of the {strategy} strategy",
+                     column_config={"date": st.column_config.DateColumn(),
+                                    "improvement": st.column_config.NumberColumn("after-cost gain", format="percent"),
+                                    "cost_usd": st.column_config.NumberColumn("est. cost", format="dollar")})
+        st.caption("Hedge reviews are logged separately from stock decisions; they start once the hedge method is "
+                   "chosen (milestone 7).")
+        if not bt["bt_dropped"].empty:
+            with st.expander(f"Shortlisted stocks skipped at some reviews ({len(bt['bt_dropped'])})"):
+                st.dataframe(bt["bt_dropped"], hide_index=True, alt="Stocks without a full price window at a review")
+
+with tabs[6]:
+    st.info(f"Hedging is not built yet — arrives in {HEDGING_PENDING}.", icon=":material/construction:")
+
+with tabs[7]:
+    if bt is None:
+        st.info(NO_BACKTEST)
+    else:
+        bm, summ, nav = bt["meta"], bt["bt_summary"], bt["bt_nav"]
+        st.warning(f"Results are {bm['label']}. Today's winners are replayed into the past, so every strategy "
+                   "here is flattered; compare strategies with each other, not with real-world returns.",
+                   title="Preliminary backtest", icon=":material/warning:")
+        best = summ.loc[summ["strategy"].isin(bm["strategies"])].set_index("strategy")
+        c = st.columns(len(best))
+        for col, (name, row) in zip(c, best.iterrows()):
+            col.metric(name.replace("_", " ").capitalize(), f"{row['cagr_net']:.1%}",
+                       f"max drawdown {row['max_drawdown']:.0%}", delta_color="off", help="Net CAGR after costs")
+        st.plotly_chart(charts.bt_growth(nav), width="stretch", alt="NAV of each strategy and SPY over the backtest")
+        left, right = st.columns(2)
+        left.plotly_chart(charts.bt_drawdowns(nav), width="stretch", alt="Drawdown of each strategy over time")
+        right.plotly_chart(charts.bt_holdings(nav), width="stretch", alt="Number of stocks held by each strategy")
+        st.dataframe(summ, hide_index=True, alt="Backtest summary per strategy",
+                     column_config={c: st.column_config.NumberColumn(format="percent")
+                                    for c in ["cagr_net", "cagr_gross", "volatility", "max_drawdown"]}
+                     | {c: st.column_config.NumberColumn(format="dollar") for c in ["final_nav", "total_costs"]}
+                     | {"return_over_vol": st.column_config.NumberColumn("return / vol", format="%.2f")})
+        st.caption("Net = after trading costs. Gross adds the total costs back to the final NAV (ignoring their "
+                   "compounding). The SPY row is a reference with no costs, not a strategy. All strategies start "
+                   f"from the same {bm['start_decision']} core, capital and cost model.")
+        with st.expander(f"All trades ({len(bt['bt_trades'])})"):
+            st.dataframe(bt["bt_trades"][["strategy", "fill_date", "ticker", "order_qty", "filled_qty", "fill_price",
+                                          "commission", "total_cost", "status"]],
+                         hide_index=True, alt="Every simulated fill in the backtest")

@@ -29,3 +29,11 @@ def test_scenarios_scale_every_component(tmp_path):
     total = summary.set_index("scenario")["total_cost"]
     assert total["low"] == pytest.approx(total["base"] / 2)
     assert total["high"] == pytest.approx(total["base"] * 2)
+
+
+def test_commission_uses_real_shares_after_splits(tmp_path):
+    s = make_settings(tmp_path)
+    # 40,000 split-adjusted shares = 1,000 real shares when 40:1 of splits happened later
+    c = costs.stock_costs(pd.Series([40_000]), pd.Series([1.0]), s, split_factor=pd.Series([40.0]))
+    assert c.loc[0, "commission"] == pytest.approx(5.0)  # not 200
+    assert c.loc[0, "spread_cost"] == pytest.approx(40_000 * 2e-4)  # value-based costs unchanged

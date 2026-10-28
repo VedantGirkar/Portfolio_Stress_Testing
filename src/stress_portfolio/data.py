@@ -168,6 +168,13 @@ def _longest_flat_run(close: pd.Series) -> int:
     return int(same.groupby((~same).cumsum()).sum().max()) if len(close) else 0
 
 
+def future_split_factor(bars: pd.DataFrame) -> pd.DataFrame:
+    """Date x ticker product of split ratios strictly after each date: split-adjusted shares / factor =
+    real shares on that date (e.g. NVDA in 2016 is 40 after its 4:1 and 10:1 splits)."""
+    ratio = wide(bars, "splits").fillna(0.0).replace(0.0, 1.0)
+    return (ratio.iloc[::-1].cumprod().iloc[::-1].shift(-1)).fillna(1.0)
+
+
 def wide(bars: pd.DataFrame, field: str) -> pd.DataFrame:
     """Date x ticker table on the common session calendar (union of all dates)."""
     return bars.pivot(index="date", columns="ticker", values=field).sort_index()

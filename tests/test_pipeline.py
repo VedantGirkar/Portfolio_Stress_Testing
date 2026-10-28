@@ -181,3 +181,30 @@ def test_dashboard_without_runs(tmp_path, monkeypatch):
     at = AppTest.from_file(APP, default_timeout=60).run()
     assert not at.exception
     assert "No selection runs" in at.warning[0].value
+
+
+def test_backtest_command_writes_labelled_run(tmp_path, offline_world):
+    s = make_settings(tmp_path, backtest_start="2025-03-15", backtest_universe_size=10, backtest_estimation_sessions=200,
+                      stress_loss_budget=0.6)
+    run_dir = main.run_backtest_cmd(s, offline=False, now=NOW)
+    for name in ["bt_nav", "bt_trades", "bt_decisions", "bt_summary", "bt_initial_core", "bt_dropped"]:
+        assert (run_dir / f"{name}.csv").exists(), name
+    meta = json.loads((run_dir / "metadata.json").read_text())
+    assert meta["workflow"] == "backtest" and "survivorship-biased" in meta["label"]
+    assert meta["reviews"] == 2  # 2025-03-31 and 2025-06-30 (its next session, 07-01, starts a new quarter)
+    assert not (run_dir / "core.csv").exists()  # backtest runs stay out of the build/select run list
+    offline = main.run_backtest_cmd(s, offline=True, now=NOW)  # cached rerun gives the same result
+    pd.testing.assert_frame_equal(pd.read_csv(run_dir / "bt_summary.csv"), pd.read_csv(offline / "bt_summary.csv"))
+
+
+def test_dashboard_renders_backtest_run(tmp_path, offline_world, monkeypatch):
+    s = make_settings(tmp_path, backtest_start="2025-03-15", backtest_universe_size=10, backtest_estimation_sessions=200,
+                      stress_loss_budget=0.6)
+    main.run_select(s, offline=False, now=NOW, fund=True)
+    main.run_backtest_cmd(s, offline=False, now=NOW)
+    monkeypatch.setenv("STRESS_PORTFOLIO_RUNS_DIR", str(s.runs_dir))
+    at = AppTest.from_file(APP, default_timeout=60).run()
+    assert not at.exception
+    assert [t.label for t in at.tabs] == ["Overview", "Selection", "Risk", "Stress", "Optimization", "Rebalancing",
+                                          "Hedging", "Backtest"]
+    assert any("survivorship-biased" in w.value for w in at.warning)
