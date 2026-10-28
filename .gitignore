@@ -12,3 +12,7 @@ wheels/
 # Data caches and run outputs
 data/
 outputs/
+
+# Editor settings and tool caches
+.idea/
+graphify-out/
