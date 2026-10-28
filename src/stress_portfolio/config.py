@@ -54,6 +54,13 @@ class Settings:
     slippage_bps: float = 3.0
     cost_scenario: str = "base"  # low = 0.5x, base = 1x, high = 2x
 
+    # Risk (historical simulation of today's holdings; losses are positive numbers)
+    benchmark_ticker: str = "SPY"
+    var_confidences: tuple[float, ...] = (0.95, 0.99)
+    var_horizons_days: tuple[int, ...] = (1, 10)  # multi-day = compounded overlapping returns, no sqrt-time
+    risk_lookback_sessions: int | None = None  # None = every session all holdings share
+    var_backtest_min_window: int = 252  # expanding-window VaR needs this many prior days first
+
     # Hedge (decided at milestone 7; a full-strategy run must reject "undecided")
     hedge_method: str = "undecided"
 

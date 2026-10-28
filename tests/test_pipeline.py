@@ -19,6 +19,8 @@ APP = str(Path(__file__).resolve().parents[1] / "dashboard" / "app.py")
 @pytest.fixture
 def offline_world(monkeypatch):
     membership, bars = make_universe()
+    spy = bars.groupby("date", as_index=False)[["open", "high", "low", "close", "adj_close", "volume"]].mean()
+    bars = pd.concat([bars, spy.assign(ticker="SPY", dividends=0.0, splits=0.0)], ignore_index=True)
 
     def fake_batch(tickers, start, end):
         keep = bars["ticker"].isin(tickers) & (bars["date"] >= start) & (bars["date"] < end)  # yfinance end is exclusive
@@ -105,6 +107,12 @@ def test_build_funds_core_and_reconciles(tmp_path, offline_world):
     assert set(stocks["ticker"]) == set(pd.read_csv(run_dir / "core.csv")["provider_ticker"])
     assert nav["cash"] > 0  # the reserve stays in cash
     assert holdings["weight_of_nav"].sum() == pytest.approx(1.0)
+
+    for name in ["risk_var", "risk_summary", "risk_positions", "risk_sectors", "risk_correlation", "risk_series",
+                 "var_backtest", "var_backtest_summary"]:
+        assert (run_dir / f"{name}.csv").exists(), name
+    risk_meta = json.loads((run_dir / "metadata.json").read_text())["risk"]
+    assert risk_meta["es_1d_99_usd"] >= risk_meta["var_1d_99_usd"] > 0
 
 
 def test_build_cannot_see_the_fill_day(tmp_path, offline_world):

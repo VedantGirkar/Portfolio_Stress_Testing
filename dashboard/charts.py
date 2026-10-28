@@ -76,3 +76,56 @@ def eligibility_reasons(eligibility: pd.DataFrame) -> go.Figure:
     counts = counts.rename_axis("reason").reset_index(name="stocks")
     fig = px.bar(counts, y="reason", x="stocks", orientation="h", title="S&P 500 eligibility outcome")
     return _tidy(fig.update_yaxes(categoryorder="total ascending"), height=320)
+
+
+def pnl_histogram(series: pd.DataFrame, hist: pd.DataFrame) -> go.Figure:
+    fig = px.histogram(series, x="pnl_usd", nbins=80, title="Hypothetical 1-day P&L of today's book (USD)")
+    for conf, color, side in [(0.95, "#f59e0b", "top right"), (0.99, "#ef4444", "top left")]:
+        var = hist.at[(1, conf), "var_usd"]
+        fig.add_vline(x=-var, line_color=color, line_dash="dash",
+                      annotation_text=f"VaR {conf:.0%}: -${var:,.0f}", annotation_position=side)
+    return _tidy(fig.update_layout(xaxis_title="daily P&L (USD)", yaxis_title="days", showlegend=False))
+
+
+def growth_vs_benchmark(series: pd.DataFrame, benchmark: str) -> go.Figure:
+    df = series.rename(columns={"portfolio_path": "today's book", "benchmark_path": benchmark})
+    fig = px.line(df, x="date", y=["today's book", benchmark], title=f"Growth of $1: today's book vs {benchmark}")
+    return _tidy(fig.update_layout(yaxis_title="value of $1", xaxis_title=""))
+
+
+def drawdown_area(series: pd.DataFrame) -> go.Figure:
+    fig = px.area(series, x="date", y="portfolio_drawdown", title="Drawdown of today's book (hypothetical)")
+    fig.update_traces(line_color="#ef4444")
+    return _tidy(fig.update_layout(yaxis_tickformat=".0%", yaxis_title="below peak", xaxis_title=""))
+
+
+def risk_contributions(positions: pd.DataFrame) -> go.Figure:
+    df = positions.sort_values("risk_contribution_pct", ascending=False)
+    fig = go.Figure([
+        go.Bar(name="Weight (% of NAV)", x=df["ticker"], y=df["weight_of_nav"], marker_color="#94a3b8"),
+        go.Bar(name="Share of portfolio variance", x=df["ticker"], y=df["risk_contribution_pct"],
+               marker_color="#ef4444"),
+    ])
+    fig.update_layout(barmode="group", title="Weight vs risk contribution", yaxis_tickformat=".0%")
+    return _tidy(fig)
+
+
+def correlation_heatmap(corr: pd.DataFrame) -> go.Figure:
+    m = corr.set_index("ticker")
+    fig = px.imshow(m, zmin=-1, zmax=1, color_continuous_scale="RdBu_r", text_auto=".2f",
+                    title="Correlation of daily returns")
+    return _tidy(fig, height=420)
+
+
+def var_backtest(backtest: pd.DataFrame) -> go.Figure:
+    fig = go.Figure(go.Scatter(x=backtest["date"], y=backtest["pnl"], mode="lines", name="daily P&L",
+                               line=dict(color="#94a3b8", width=1)))
+    for col, color in [("var_95%", "#f59e0b"), ("var_99%", "#ef4444")]:
+        if col in backtest:
+            fig.add_scatter(x=backtest["date"], y=-backtest[col], name=f"-{col.replace('_', ' ').upper()}",
+                            line=dict(color=color))
+            hits = backtest.loc[backtest[col.replace("var", "exceed")]]
+            fig.add_scatter(x=hits["date"], y=hits["pnl"], mode="markers", marker=dict(color=color, size=7),
+                            name=f"breach {col[4:]}")
+    fig.update_layout(title="VaR backtest: each day's VaR from earlier days only", yaxis_title="USD")
+    return _tidy(fig, height=420)

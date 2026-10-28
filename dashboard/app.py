@@ -15,7 +15,6 @@ from stress_portfolio.config import Settings  # noqa: E402
 
 RUNS_DIR = Path(os.environ.get("STRESS_PORTFOLIO_RUNS_DIR", Settings().runs_dir))
 COMING = {
-    "Risk": "milestone 3 — VaR, expected shortfall, drawdowns, correlations",
     "Stress": "milestone 4 — historical and hypothetical scenarios",
     "Optimization": "milestone 5 — efficient frontier and candidate allocations",
     "Rebalancing": "milestone 6 — proposed orders and costs",
@@ -37,7 +36,9 @@ def selection_runs() -> list[Path]:
 def load_run(path: str) -> dict:
     p = Path(path)
     tables = {n: pd.read_csv(p / f"{n}.csv") for n in ["core", "reserves", "shortlist", "sector_quotas", "eligibility"]}
-    for n in ["holdings", "orders", "nav", "cost_scenarios"]:  # only in `build` runs
+    for n in ["holdings", "orders", "nav", "cost_scenarios", "risk_var", "risk_summary", "risk_positions",
+              "risk_sectors", "risk_correlation", "risk_series", "var_backtest", "var_backtest_summary"]:
+        # only in `build` runs; risk tables only in builds made after milestone 3
         if (p / f"{n}.csv").exists():
             tables[n] = pd.read_csv(p / f"{n}.csv")
     tables["meta"] = json.loads((p / "metadata.json").read_text())
@@ -73,7 +74,7 @@ st.sidebar.markdown(
 )
 st.sidebar.caption(meta["membership"]["limitation"])
 
-tabs = st.tabs(["Overview", "Selection", *COMING])
+tabs = st.tabs(["Overview", "Selection", "Risk", *COMING])
 
 with tabs[0]:
     core, reserves, short = r["core"], r["reserves"], r["shortlist"]
@@ -159,6 +160,69 @@ with tabs[1]:
     st.dataframe(elig[["ticker", "company", "sector", "eligibility_reason", "observations",
                        "median_dollar_volume"]], hide_index=True, width="stretch")
 
-for tab, (name, when) in zip(tabs[2:], COMING.items()):
+with tabs[2]:
+    if "risk_var" not in r:
+        st.info("No risk results in this run. Create a new run with `uv run stress-portfolio build`.")
+    else:
+        rm, var, summ = meta["risk"], r["risk_var"], r["risk_summary"].set_index("metric")["value"]
+        hist = var.loc[var["method"] == "historical"].set_index(["horizon_days", "confidence"])
+        nav_now = meta["portfolio"]["nav"]
+        st.caption(f"Historical simulation: today's holdings repriced with each day's returns from {rm['window'][0]} "
+                   f"to {rm['window'][1]}. These are hypothetical P&Ls of today's book, not past results. "
+                   "Losses are positive. VaR is a loss level exceeded on about 1% (or 5%) of past days, "
+                   "not the worst possible loss.")
+        c = st.columns(5)
+        c[0].metric("1-day VaR 99%", money(hist.at[(1, 0.99), "var_usd"]),
+                    f"{hist.at[(1, 0.99), 'var_pct_nav']:.2%} of NAV", delta_color="off")
+        c[1].metric("1-day ES 99%", money(hist.at[(1, 0.99), "es_usd"]),
+                    f"{hist.at[(1, 0.99), 'es_pct_nav']:.2%} of NAV", delta_color="off")
+        c[2].metric("10-day VaR 99%", money(hist.at[(10, 0.99), "var_usd"]),
+                    f"{hist.at[(10, 0.99), 'var_pct_nav']:.2%} of NAV", delta_color="off")
+        c[3].metric("Volatility", f"{summ['volatility']:.1%}", "annual", delta_color="off")
+        c[4].metric(f"Beta vs {rm['benchmark']}", f"{summ['beta']:.2f}",
+                    f"correlation {summ['correlation']:.2f}", delta_color="off")
+
+        st.plotly_chart(charts.pnl_histogram(r["risk_series"], hist), width="stretch")
+        st.subheader("VaR and expected shortfall")
+        st.dataframe(var[["method", "horizon_days", "confidence", "observations", "var_usd", "var_pct_nav",
+                          "es_usd", "es_pct_nav", "convention"]],
+                     hide_index=True, width="stretch",
+                     column_config={c: st.column_config.NumberColumn(format="dollar") for c in ["var_usd", "es_usd"]}
+                     | {c: st.column_config.NumberColumn(format="percent") for c in ["var_pct_nav", "es_pct_nav",
+                                                                                      "confidence"]})
+        st.caption("10-day figures use overlapping compounded 10-day returns, so neighbouring observations "
+                   "share 9 days. The normal rows assume normally distributed P&L; the gap to historical shows "
+                   "how fat the real tails are.")
+
+        left, right = st.columns(2)
+        left.plotly_chart(charts.growth_vs_benchmark(r["risk_series"], rm["benchmark"]), width="stretch")
+        right.plotly_chart(charts.drawdown_area(r["risk_series"]), width="stretch")
+        st.caption("Not a performance record: these stocks were picked partly for strong past momentum, so "
+                   "replaying them over the past flatters their history (selection bias). Use these paths for "
+                   "the size and shape of swings, not for expected returns.")
+
+        st.subheader("Where the risk comes from")
+        left, right = st.columns(2)
+        left.plotly_chart(charts.risk_contributions(r["risk_positions"]), width="stretch")
+        right.plotly_chart(charts.correlation_heatmap(r["risk_correlation"]), width="stretch")
+        st.dataframe(r["risk_positions"], hide_index=True, width="stretch",
+                     column_config={"weight_of_nav": st.column_config.NumberColumn("% of NAV", format="percent"),
+                                    "volatility_annual": st.column_config.NumberColumn("volatility", format="percent"),
+                                    "risk_contribution_pct": st.column_config.NumberColumn("share of variance",
+                                                                                           format="percent")})
+
+        st.subheader("Does the VaR model hold up?")
+        st.plotly_chart(charts.var_backtest(r["var_backtest"]), width="stretch")
+        st.dataframe(r["var_backtest_summary"], hide_index=True, width="stretch")
+        st.caption("Each day's 1-day VaR is estimated only from earlier days, then compared with that day's "
+                   "hypothetical P&L. A Kupiec p-value below 0.05 means the breach count is unlikely if the "
+                   "model were right.")
+
+        st.subheader("Concentration and other measures")
+        st.dataframe(r["risk_summary"][["metric", "value", "unit", "note"]], hide_index=True, width="stretch")
+        st.caption("realized_* rows come from the real NAV since funding; everything else is estimated from "
+                   f"the hypothetical history. Realized NAV covers {len(r['nav'])} session(s) so far.")
+
+for tab, (name, when) in zip(tabs[3:], COMING.items()):
     with tab:
         st.info(f"**{name}** is not built yet — arrives in {when}.")
