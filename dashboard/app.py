@@ -37,6 +37,9 @@ def selection_runs() -> list[Path]:
 def load_run(path: str) -> dict:
     p = Path(path)
     tables = {n: pd.read_csv(p / f"{n}.csv") for n in ["core", "reserves", "shortlist", "sector_quotas", "eligibility"]}
+    for n in ["holdings", "orders", "nav", "cost_scenarios"]:  # only in `build` runs
+        if (p / f"{n}.csv").exists():
+            tables[n] = pd.read_csv(p / f"{n}.csv")
     tables["meta"] = json.loads((p / "metadata.json").read_text())
     return tables
 
@@ -45,6 +48,11 @@ def fmt(df: pd.DataFrame) -> pd.DataFrame:
     out = df[[c for c in TABLE_COLS if c in df.columns]].copy()
     out["median_dollar_volume"] = (out["median_dollar_volume"] / 1e6).round(1)
     return out.rename(columns={"median_dollar_volume": "median $ vol (M)"})
+
+
+def money(x: float) -> str:
+    """Short enough for a metric card: $1.003M, $34.5K, $504."""
+    return f"${x / 1e6:.3f}M" if abs(x) >= 1e6 else f"${x / 1e3:.1f}K" if abs(x) >= 1e4 else f"${x:,.0f}"
 
 
 st.title("Stress-tested equity portfolio")
@@ -68,19 +76,57 @@ st.sidebar.caption(meta["membership"]["limitation"])
 tabs = st.tabs(["Overview", "Selection", *COMING])
 
 with tabs[0]:
-    st.caption("Target weights of the equity sleeve. No orders, fills, cash or NAV yet — the ledger arrives "
-               "in milestone 2.")
     core, reserves, short = r["core"], r["reserves"], r["shortlist"]
-    c = st.columns(5)
-    c[0].metric("Core holdings", len(core))
-    c[1].metric("Reserves", len(reserves))
-    c[2].metric("Core sectors", core["sector"].nunique())
-    c[3].metric("Shortlist sectors", short["sector"].nunique())
-    c[4].metric("Hedge", "TBD", help="Delta or gamma method is chosen at milestone 7")
-    left, right = st.columns(2)
-    left.plotly_chart(charts.core_weight_pie(core), width="stretch")
-    right.plotly_chart(charts.core_sector_pie(core), width="stretch")
-    st.subheader("Core portfolio")
+    if "holdings" in r:
+        book, h = meta["portfolio"], r["holdings"]
+        st.caption(f"Simulated book: decided on {book['decision_date']} close, bought at the {book['fill_date']} "
+                   f"open, valued at the {book['valuation_date']} close.")
+        c = st.columns(5)
+        c[0].metric("NAV", money(book['nav']), f"{book['nav'] / book['initial_capital'] - 1:+.2%}")
+        c[1].metric("Cash", money(book['cash']), f"{book['cash'] / book['nav']:.1%} of NAV", delta_color="off")
+        c[2].metric("Holdings", int((h["ticker"] != "CASH").sum()))
+        c[3].metric("Trading costs", money(book['total_trading_cost']))
+        c[4].metric("Hedge", "TBD", help="Delta or gamma method is chosen at milestone 7")
+        left, right = st.columns(2)
+        left.plotly_chart(charts.holdings_pie(h, "ticker", "Actual weights by holding (% of NAV)"),
+                          width="stretch")
+        right.plotly_chart(charts.holdings_pie(h, "sector", "Actual weights by sector (% of NAV)"),
+                           width="stretch")
+        st.subheader("Holdings")
+        st.dataframe(
+            h[["ticker", "company", "sector", "quantity", "price", "market_value", "weight_of_nav",
+               "target_weight_of_nav"]],
+            hide_index=True, width="stretch",
+            column_config={
+                "price": st.column_config.NumberColumn(format="dollar"),
+                "market_value": st.column_config.NumberColumn("market value", format="dollar"),
+                "weight_of_nav": st.column_config.NumberColumn("actual % of NAV", format="percent"),
+                "target_weight_of_nav": st.column_config.NumberColumn("target % of NAV", format="percent"),
+            },
+        )
+        if len(r["nav"]) > 1:
+            st.plotly_chart(charts.nav_line(r["nav"]), width="stretch")
+        with st.expander(f"Trades and costs ({len(r['orders'])} orders)"):
+            st.dataframe(r["orders"][["ticker", "order_qty", "filled_qty", "decision_price", "ref_price",
+                                      "fill_price", "commission", "spread_cost", "slippage_cost", "total_cost",
+                                      "status", "reason"]].round(4).astype({"reason": "string"}).fillna({"reason": ""}),
+                         hide_index=True,
+                         width="stretch")
+            st.caption("Cost sensitivity for the same trades (base is what was charged):")
+            st.dataframe(r["cost_scenarios"].round(2), hide_index=True, width="stretch")
+            st.caption(" · ".join(book["conventions"]))
+    else:
+        st.caption("Selection-only run: target weights of the equity sleeve, no holdings or cash. "
+                   "Run `stress-portfolio build` for a funded portfolio.")
+        c = st.columns(4)
+        c[0].metric("Core holdings", len(core))
+        c[1].metric("Reserves", len(reserves))
+        c[2].metric("Core sectors", core["sector"].nunique())
+        c[3].metric("Hedge", "TBD", help="Delta or gamma method is chosen at milestone 7")
+        left, right = st.columns(2)
+        left.plotly_chart(charts.core_weight_pie(core), width="stretch")
+        right.plotly_chart(charts.core_sector_pie(core), width="stretch")
+    st.subheader("Core selection")
     st.dataframe(
         fmt(core).assign(target_weight=core["target_weight"], order=core["selection_order"].astype(int))
         .set_index("order"),

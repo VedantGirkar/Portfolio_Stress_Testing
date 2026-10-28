@@ -9,7 +9,8 @@ See `PROJECT_SPECIFICATION.md` for the full specification and `CLAUDE.md` for wo
 | Milestone | State |
 |---|---|
 | 1. Data and selection | Implemented |
-| 2–10. Ledger, risk, stress, optimization, rebalancing, hedging, backtest | Not started |
+| 2. Ledger, costs, execution | Implemented for stocks (option positions arrive with hedging, milestone 8) |
+| 3–10. Risk, stress, optimization, rebalancing, hedging, backtest | Not started |
 
 ## Setup
 
@@ -34,16 +35,24 @@ uv run stress-portfolio select --offline
 
 All selection assumptions (liquidity threshold, score weights, correlation penalty, sector limits) are in `src/stress_portfolio/config.py`.
 
+## Build a funded portfolio
+
+```bash
+uv run stress-portfolio build
+```
+
+Selects the core as of the previous completed session, buys it with simulated capital at the next session's open (whole shares, after a cash reserve and trading costs), and values it at the latest close. Adds `orders.csv` (with itemized costs), `holdings.csv`, `ledger.csv`, `nav.csv` and `cost_scenarios.csv` to the run. Capital, cash reserve and cost assumptions are in `config.py`. Each build is a fresh funding; carrying a portfolio forward through time comes with the backtest.
+
 ## Dashboard
 
 ```bash
 uv run streamlit run dashboard/app.py
 ```
 
-Shows the latest (or any saved) run: core target weights by stock and sector, the shortlist by sector, reserves grouped by sector, scores and eligibility. Tabs for later milestones are present but empty.
+Shows the latest (or any saved) run. Build runs show NAV, cash, actual vs target weights, holdings and trades with costs. Every run shows core target weights by stock and sector, the shortlist by sector, reserves grouped by sector, scores and eligibility. Tabs for later milestones are present but empty.
 
 ## Known limitations
 
 - Uses the current constituent list, not point-in-time membership. Fine for today's selection; a historical backtest needs point-in-time membership first.
-- Target weights only: no orders, cash ledger or NAV until milestone 2.
+- Yahoo prices and dividends are split-adjusted, so share quantities are in split-adjusted units, and dividends are credited on the ex-date rather than the pay date.
 - Yahoo data is unofficial; check the provider's terms before relying on it.

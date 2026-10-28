@@ -12,6 +12,7 @@ class Settings:
     membership_url: str = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
     history_calendar_days: int = 1100  # enough sessions for min_observations plus holidays
     download_chunk_size: int = 75
+    max_download_failure_share: float = 0.02  # stop the run rather than select from a partial universe
     data_dir: Path = ROOT / "data"
     runs_dir: Path = ROOT / "outputs" / "runs"
 
@@ -42,6 +43,17 @@ class Settings:
     max_per_sector: int = 2
     min_sectors: int = 5
 
+    # Capital and execution (simulated only)
+    initial_capital: float = 1_000_000.0
+    cash_reserve: float = 0.03  # share of NAV kept in cash for costs and the future hedge
+
+    # Stock trading costs; the scenario multiplier scales all of them
+    commission_per_share: float = 0.005
+    min_commission_per_order: float = 1.0
+    half_spread_bps: float = 2.0
+    slippage_bps: float = 3.0
+    cost_scenario: str = "base"  # low = 0.5x, base = 1x, high = 2x
+
     # Hedge (decided at milestone 7; a full-strategy run must reject "undecided")
     hedge_method: str = "undecided"
 
@@ -59,6 +71,10 @@ class Settings:
             raise ValueError("min_observations must cover the feature window")
         if self.momentum_lookback_sessions + self.momentum_skip_sessions >= self.feature_window_prices:
             raise ValueError("momentum window must fit inside the feature window")
+        if self.initial_capital <= 0 or not 0 <= self.cash_reserve < 1:
+            raise ValueError("initial_capital must be positive and cash_reserve in [0, 1)")
+        if self.cost_scenario not in {"low", "base", "high"}:
+            raise ValueError(f"unknown cost_scenario {self.cost_scenario!r}")
         if self.hedge_method not in {"undecided", "delta", "gamma"}:
             raise ValueError(f"unknown hedge_method {self.hedge_method!r}")
 

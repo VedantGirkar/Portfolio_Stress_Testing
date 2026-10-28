@@ -24,6 +24,17 @@ def core_sector_pie(core: pd.DataFrame) -> go.Figure:
     return _tidy(fig.update_traces(textinfo="percent"))
 
 
+def holdings_pie(holdings: pd.DataFrame, by: str, title: str) -> go.Figure:
+    by_group = holdings.groupby(by, as_index=False)["market_value"].sum()
+    fig = px.pie(by_group, names=by, values="market_value", hole=0.45, title=title)
+    return _tidy(fig.update_traces(textinfo="label+percent" if by == "ticker" else "percent", sort=False))
+
+
+def nav_line(nav: pd.DataFrame) -> go.Figure:
+    fig = px.line(nav, x="date", y=["nav", "equity_value", "cash"], title="NAV, equity and cash")
+    return _tidy(fig.update_layout(yaxis_title="USD", xaxis_title=""))
+
+
 def shortlist_treemap(shortlist: pd.DataFrame) -> go.Figure:
     df = shortlist.assign(count=1)
     fig = px.treemap(df, path=[px.Constant("Shortlist"), "sector", "ticker"], values="count", color="role",
