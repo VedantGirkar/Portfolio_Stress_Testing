@@ -17,3 +17,7 @@ outputs/
 .idea/
 graphify-out/
 .DS_Store
+
+# Streamlit skill links into the local .venv
+.agents/
+.claude/skills/
