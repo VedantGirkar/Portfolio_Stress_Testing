@@ -107,3 +107,14 @@ def test_hypothetical_shocks(tmp_path):
     assert pos[("combined", "B")] == pytest.approx(0.8 * 0.8 - 1)
     assert pos[("combined", "C")] == pytest.approx(0.5 * -0.2)  # not in the shocked sector
     assert set(out["stress_scenarios"]["group"]) == {"train"}
+
+
+def test_scenario_returns_flags_validation_inside_training(tmp_path):
+    s = make_settings(tmp_path, stress_events=EVENT)
+    holdings, risk_positions = _book()
+    stocks = holdings.loc[holdings["ticker"] != "CASH"].set_index("ticker")[["sector"]]
+    matrix, groups = stress.scenario_returns(stocks, _history(), risk_positions.set_index("ticker")["beta"],
+                                             "Energy", s)
+    assert groups["inner"] == "validation (overlaps training)"  # never counted as out-of-sample
+    assert groups["crash"] == "train" and "old" not in matrix.index  # no data, no row
+    assert matrix.loc["crash", "A"] == pytest.approx(-0.4)

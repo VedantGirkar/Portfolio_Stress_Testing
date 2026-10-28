@@ -103,3 +103,25 @@ def test_evaluate_splits_train_and_validation(tmp_path):
     e = opt.evaluate(pd.Series({"A": 0.7}), mu, cov, scen, groups, holdings, pd.Series({"A": 7.0, "B": 1.0}), 100, s)
     assert (e["worst_train_loss"], e["worst_validation_loss"]) == (pytest.approx(0.35), pytest.approx(0.63))
     assert e["trades"] == 0 and e["est_cost_usd"] == 0 and e["turnover"] == 0  # unchanged book costs nothing
+
+
+def test_infeasible_after_dropping_names_the_cause(tmp_path):
+    s = make_settings(tmp_path, **{**LOOSE, "max_position_weight": 0.15, "min_position_weight": 0.10})
+    names = [f"S{i}" for i in range(7)]
+    mu = pd.Series(0.08, index=names)
+    cov = pd.DataFrame(np.diag([0.01] * 6 + [1.0]), index=names, columns=names)  # S6 gets only the last 7%
+    w, status = opt.solve("min_variance", mu, cov, pd.Series(names, index=names), pd.Series(dtype=float), s)
+    assert w.empty and status == "infeasible after dropping 1 position(s) under 10%"
+
+
+def test_universe_sector_cap_scales_with_settings(tmp_path, monkeypatch):
+    caps = {}
+
+    def fake_select(short, rets, sk):
+        caps[sk.core_size] = sk.max_per_sector
+        return pd.DataFrame({"provider_ticker": []})
+
+    monkeypatch.setattr(opt.selection, "select_core", fake_select)
+    s = make_settings(tmp_path, core_size=10, max_per_sector=3, holding_counts=(10, 20), shortlist_size=20)
+    opt.universes(pd.DataFrame(), pd.DataFrame(), s)
+    assert caps == {10: 3, 20: 6}  # the core-sized universe uses the core's own cap

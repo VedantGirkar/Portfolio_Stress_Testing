@@ -280,7 +280,9 @@ with tabs[4]:
             f"({om['estimation_window'][0]} to {om['estimation_window'][1]}). Expected return = {om['expected_return']}; "
             "these are estimates, not forecasts. Stocks for each universe size come from the selection heuristic; "
             "cvxpy then sets the weights, so each result is the best for its own universe, not a global optimum. "
-            "Proposals only: nothing here trades (rebalancing decisions arrive in milestone 6).")
+            "Proposals only: nothing here trades (rebalancing decisions arrive in milestone 6). The window is "
+            "shorter than the Risk tab's because every shortlisted stock must have prices on every day, so the "
+            "current book's volatility here differs slightly from the Risk tab.")
         c = st.columns(4)
         c[0].metric("Candidates", len(cand) - 1, f"{len(om['infeasible'])} infeasible", delta_color="off")
         c[1].metric("Stress budget", f"{con['stress_loss_budget']:.0%}", "max training-scenario loss",
@@ -313,7 +315,8 @@ with tabs[4]:
             | {"est_cost_usd": st.column_config.NumberColumn("est. cost", format="dollar"),
                "sharpe": st.column_config.NumberColumn("return / vol", format="%.2f")})
         st.caption("Training losses are what the stress-aware optimizer was allowed to see; validation losses are an "
-                   "out-of-sample check it never used. Estimated cost uses the full cost model on whole-share orders "
+                   "out-of-sample check it never used. Validation events inside a training window (Lehman inside "
+                   "the GFC, 9/11 inside the dot-com bust) are left out of that check. Estimated cost uses the full cost model on whole-share orders "
                    "from today's holdings. 'Infeasible' means no weights satisfy every limit.")
 
         st.subheader("Compare weights")

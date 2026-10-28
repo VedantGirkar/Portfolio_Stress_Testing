@@ -33,10 +33,11 @@ def estimates(rets: pd.DataFrame, bench: pd.Series, s: Settings) -> tuple[pd.Ser
 
 
 def universes(shortlist: pd.DataFrame, sel_returns: pd.DataFrame, s: Settings) -> dict[int, list[str]]:
-    """Stocks for each holding count, from the same sequential selection with a sector cap of ceil(count / 5)."""
+    """Stocks for each holding count, from the same sequential selection with the core's sector cap scaled
+    to the count (2 per 10 stocks by default), so the core-sized universe is the current core."""
     out = {}
     for k in s.holding_counts:
-        sk = replace(s, core_size=k, max_per_sector=math.ceil(k / 5))
+        sk = replace(s, core_size=k, max_per_sector=math.ceil(k * s.max_per_sector / s.core_size))
         out[k] = sorted(selection.select_core(shortlist, sel_returns, sk)["provider_ticker"])
     return out
 
@@ -71,7 +72,8 @@ def solve(kind: str, mu: pd.Series, cov: pd.DataFrame, sectors: pd.Series, w0: p
         prob = cp.Problem(objective, cons)
         prob.solve(solver=cp.CLARABEL)
         if prob.status not in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE):
-            return pd.Series(dtype=float), prob.status
+            cause = f" after dropping {dropped} position(s) under {s.min_position_weight:.0%}" if dropped else ""
+            return pd.Series(dtype=float), f"{prob.status}{cause}"
         weights = pd.Series(np.where(w.value > TOL, w.value, 0.0), index=names)
         small = weights[(weights > 0) & (weights < s.min_position_weight - TOL)].index
         if small.empty:

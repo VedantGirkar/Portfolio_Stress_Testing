@@ -104,13 +104,15 @@ def hypothetical_shocks(stocks: pd.DataFrame, betas: pd.Series, combined_sector:
 def scenario_returns(stocks: pd.DataFrame, history: pd.DataFrame, betas: pd.Series, combined_sector: str,
                      s: Settings) -> tuple[pd.DataFrame, pd.Series]:
     """Scenario x stock shock returns for any set of stocks (index = ticker, column sector), using the same
-    scenarios as the book's stress test, plus each scenario's train/validation group."""
+    scenarios as the book's stress test, plus each scenario's group. A validation event inside a training
+    window is grouped "validation (overlaps training)" so it never counts as an out-of-sample check."""
     unit = stocks[["sector"]].assign(market_value=1.0)
     hist_defs, hist_pos = replay_events(unit, history, betas, s)
     hypo_defs, hypo_pos = hypothetical_shocks(unit, betas, combined_sector, s)
     matrix = pd.concat(hist_pos + hypo_pos).pivot(index="scenario", columns="ticker", values="shock_return")
-    groups = pd.DataFrame(hist_defs + hypo_defs).set_index("scenario")["group"]
-    return matrix, groups.reindex(matrix.index)
+    defs = pd.DataFrame(hist_defs + hypo_defs)
+    defs.loc[_overlaps_training(defs), "group"] = "validation (overlaps training)"
+    return matrix, defs.set_index("scenario")["group"].reindex(matrix.index)
 
 
 def run_stress(holdings: pd.DataFrame, risk_positions: pd.DataFrame, history: pd.DataFrame,

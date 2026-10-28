@@ -88,7 +88,7 @@ class Settings:
     combined_sector_shock: float = -0.20
 
     # Optimization (annual estimates from daily total returns; cash earns zero)
-    holding_counts: tuple[int, ...] = (10, 20, 30)  # stocks per candidate universe; sector cap = ceil(count / 5)
+    holding_counts: tuple[int, ...] = (10, 20, 30)  # stocks per universe; sector cap scales with max_per_sector
     expected_return_blend: float = 0.5  # weight on the historical mean; the rest on CAPM (beta x premium)
     equity_risk_premium: float = 0.05
     risk_aversion: float = 4.0  # objective: return - risk_aversion / 2 x variance - trading cost
