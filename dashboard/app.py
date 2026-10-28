@@ -15,7 +15,6 @@ from stress_portfolio.config import Settings  # noqa: E402
 
 RUNS_DIR = Path(os.environ.get("STRESS_PORTFOLIO_RUNS_DIR", Settings().runs_dir))
 COMING = {
-    "Stress": "milestone 4 — historical and hypothetical scenarios",
     "Optimization": "milestone 5 — efficient frontier and candidate allocations",
     "Rebalancing": "milestone 6 — proposed orders and costs",
     "Hedging": "milestones 7–8 — delta or gamma hedge (method not chosen yet)",
@@ -37,7 +36,8 @@ def load_run(path: str) -> dict:
     p = Path(path)
     tables = {n: pd.read_csv(p / f"{n}.csv") for n in ["core", "reserves", "shortlist", "sector_quotas", "eligibility"]}
     for n in ["holdings", "orders", "nav", "cost_scenarios", "risk_var", "risk_summary", "risk_positions",
-              "risk_sectors", "risk_correlation", "risk_series", "var_backtest", "var_backtest_summary"]:
+              "risk_sectors", "risk_correlation", "risk_series", "var_backtest", "var_backtest_summary",
+              "stress_scenarios", "stress_positions", "stress_sectors"]:
         # only in `build` runs; risk tables only in builds made after milestone 3
         if (p / f"{n}.csv").exists():
             tables[n] = pd.read_csv(p / f"{n}.csv")
@@ -74,7 +74,7 @@ st.sidebar.markdown(
 )
 st.sidebar.caption(meta["membership"]["limitation"])
 
-tabs = st.tabs(["Overview", "Selection", "Risk", *COMING])
+tabs = st.tabs(["Overview", "Selection", "Risk", "Stress", *COMING])
 
 with tabs[0]:
     core, reserves, short = r["core"], r["reserves"], r["shortlist"]
@@ -223,6 +223,52 @@ with tabs[2]:
         st.caption("realized_* rows come from the real NAV since funding; everything else is estimated from "
                    f"the hypothetical history. Realized NAV covers {len(r['nav'])} session(s) so far.")
 
-for tab, (name, when) in zip(tabs[3:], COMING.items()):
+with tabs[3]:
+    if "stress_scenarios" not in r:
+        st.info("No stress results in this run. Create a new run with `uv run stress-portfolio build`.")
+    else:
+        sc, pos = r["stress_scenarios"], r["stress_positions"]
+        done = sc.dropna(subset=["pnl_usd"])
+        st.caption("Today's holdings hit with each scenario's moves; cash is unchanged. A historical replay asks "
+                   "'what would today's book have lost in that event?'. It is not a record of trades anyone made. "
+                   "Historical windows are SPY's deepest peak-to-trough fall inside each event.")
+        worst_h = done.loc[done.loc[done["kind"] == "historical", "pnl_usd"].idxmin()]
+        worst_y = done.loc[done.loc[done["kind"] == "hypothetical", "pnl_usd"].idxmin()]
+        c = st.columns(4)
+        c[0].metric("Worst historical", f"{worst_h['pnl_pct_nav']:.1%}", worst_h["label"], delta_color="off")
+        c[1].metric("Worst hypothetical", f"{worst_y['pnl_pct_nav']:.1%}", worst_y["label"], delta_color="off")
+        c[2].metric("Scenarios run", len(done), f"{int(sc['pnl_usd'].isna().sum())} without data",
+                    delta_color="off")
+        c[3].metric("Proxied positions", int(done["proxied_positions"].sum()), "across all events",
+                    delta_color="off")
+        st.plotly_chart(charts.stress_bars(done), width="stretch")
+        st.dataframe(
+            sc[["label", "kind", "group", "window_start", "window_end", "sessions", "benchmark_return", "pnl_usd",
+                "pnl_pct_nav", "nav_after", "proxied_positions", "overlaps_training_event", "note"]],
+            hide_index=True, width="stretch",
+            column_config={"benchmark_return": st.column_config.NumberColumn("SPY", format="percent"),
+                           "pnl_usd": st.column_config.NumberColumn("P&L", format="dollar"),
+                           "pnl_pct_nav": st.column_config.NumberColumn("% of NAV", format="percent"),
+                           "nav_after": st.column_config.NumberColumn("NAV after", format="dollar")})
+        st.caption("Training scenarios may be used by the optimizer later; validation scenarios are kept for "
+                   "checking it. A validation event that overlaps a training window (9/11 inside the dot-com "
+                   "bust, Lehman inside the GFC) is not truly held out.")
+
+        st.subheader("What drives the loss")
+        names = dict(zip(done["scenario"], done["label"]))
+        pick = st.selectbox("Scenario", list(names), format_func=names.get,
+                            index=list(names).index(worst_h["scenario"]))
+        left, right = st.columns([3, 2])
+        left.plotly_chart(charts.stress_attribution(pos.loc[pos["scenario"] == pick], names[pick]), width="stretch")
+        right.plotly_chart(charts.stress_sector_attribution(r["stress_sectors"].loc[r["stress_sectors"]["scenario"]
+                                                                                   == pick]), width="stretch")
+        st.dataframe(pos.loc[pos["scenario"] == pick].drop(columns="scenario"), hide_index=True, width="stretch",
+                     column_config={"market_value": st.column_config.NumberColumn(format="dollar"),
+                                    "shock_return": st.column_config.NumberColumn("move", format="percent"),
+                                    "pnl_usd": st.column_config.NumberColumn("P&L", format="dollar")})
+        st.caption("Source shows where each move came from: the stock's own prices, its sector ETF (stock not yet "
+                   "listed), or beta x SPY. Proxies can overstate or understate a stock's real move.")
+
+for tab, (name, when) in zip(tabs[4:], COMING.items()):
     with tab:
         st.info(f"**{name}** is not built yet — arrives in {when}.")

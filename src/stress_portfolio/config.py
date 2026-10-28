@@ -61,6 +61,32 @@ class Settings:
     risk_lookback_sessions: int | None = None  # None = every session all holdings share
     var_backtest_min_window: int = 252  # expanding-window VaR needs this many prior days first
 
+    # Stress testing. Historical events: (name, label, search start, search end, group). The replay window
+    # is SPY's deepest peak-to-trough fall inside the search range, found from the data.
+    stress_history_start: str = "2000-01-01"
+    stress_events: tuple[tuple[str, str, str, str, str], ...] = (
+        ("dotcom", "Dot-com bust", "2000-01-01", "2002-12-31", "train"),
+        ("sept11", "9/11 attacks", "2001-09-01", "2001-09-30", "validation"),
+        ("gfc", "Global Financial Crisis", "2007-07-01", "2009-06-30", "train"),
+        ("lehman", "Lehman month", "2008-09-01", "2008-10-31", "validation"),
+        ("downgrade2011", "US downgrade 2011", "2011-07-01", "2011-10-31", "train"),
+        ("china2015", "China devaluation 2015", "2015-08-01", "2015-09-30", "validation"),
+        ("q4_2018", "Q4 2018 sell-off", "2018-09-01", "2018-12-31", "validation"),
+        ("covid", "COVID crash", "2020-02-01", "2020-04-30", "train"),
+        ("rates2022", "2022 rate shock", "2022-01-01", "2022-12-31", "train"),
+        ("tariff2025", "April 2025 tariff shock", "2025-03-15", "2025-04-30", "validation"),
+    )
+    sector_etfs: tuple[tuple[str, str], ...] = (
+        ("Communication Services", "XLC"), ("Consumer Discretionary", "XLY"), ("Consumer Staples", "XLP"),
+        ("Energy", "XLE"), ("Financials", "XLF"), ("Health Care", "XLV"), ("Industrials", "XLI"),
+        ("Information Technology", "XLK"), ("Materials", "XLB"), ("Real Estate", "XLRE"), ("Utilities", "XLU"),
+    )
+    # Hypothetical shocks (all training scenarios). Market moves are scaled by each stock's beta.
+    market_shocks: tuple[float, ...] = (-0.10, -0.20, -0.35)
+    sector_shock: float = -0.25  # one held sector, market flat
+    combined_market_shock: float = -0.20  # plus combined_sector_shock in the riskiest held sector, compounded
+    combined_sector_shock: float = -0.20
+
     # Hedge (decided at milestone 7; a full-strategy run must reject "undecided")
     hedge_method: str = "undecided"
 

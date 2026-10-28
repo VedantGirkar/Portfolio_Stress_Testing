@@ -2,7 +2,6 @@
 
 import argparse
 import json
-import shutil
 import subprocess
 import uuid
 from datetime import datetime, timedelta
@@ -10,7 +9,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from . import backtest, data, risk, selection
+from . import backtest, data, risk, selection, stress
 from .config import ROOT, Settings
 
 
@@ -43,6 +42,27 @@ def run_risk(s: Settings, book: dict, bars: pd.DataFrame, price_cache: Path, sta
     cal = selection.session_calendar(adj)
     return risk.risk_report(book["holdings"], adj.reindex(cal),
                             data.wide(bench, "adj_close")[s.benchmark_ticker].reindex(cal), book["nav"], s)
+
+
+def run_stress_tests(s: Settings, book: dict, risk_tables: dict, end: str, offline: bool,
+                     now: datetime) -> dict:
+    """Load long history (holdings, benchmark, sector ETFs) in its own cache and stress the funded book."""
+    cache = s.data_dir / "raw" / "stress"
+    folder = f"{s.stress_history_start}_{end}"
+    tickers = sorted({*book["holdings"].query("ticker != 'CASH'")["ticker"], s.benchmark_ticker,
+                      *dict(s.sector_etfs).values()})
+    if offline:
+        tickers = [t for t in tickers if (cache / folder / f"{t}.csv").exists()]
+    history, failed = data.download_prices(tickers, s.stress_history_start, end, cache, s.download_chunk_size)
+    if history.empty or s.benchmark_ticker not in set(history["ticker"]):
+        how = "run `build` once without --offline" if offline else "rerun"
+        raise SystemExit(f"stress history for {s.benchmark_ticker} is not available; {how}")
+    if not offline:
+        data.prune_cache(cache, folder)
+    history, _ = data.clean_bars(data.drop_partial_session(history, now))
+    tables = stress.run_stress(book["holdings"], risk_tables["risk_positions"], data.wide(history, "adj_close"), s)
+    tables["stress_download_failures"] = failed  # these tickers fall back to proxies
+    return tables
 
 
 def run_select(s: Settings, offline: bool, now: datetime | None = None, fund: bool = False) -> Path:
@@ -82,9 +102,7 @@ def run_select(s: Settings, offline: bool, now: datetime | None = None, fund: bo
                          f"{s.max_download_failure_share:.0%} limit; {retry}. "
                          f"First failures: {failures['ticker'].head(5).tolist()}")
     if not offline:
-        for old in price_cache.glob("*_*"):  # each day's window gets a new folder; keep only the current one
-            if old.is_dir() and old.name != f"{start}_{end}":
-                shutil.rmtree(old)
+        data.prune_cache(price_cache, f"{start}_{end}")
     bars = data.drop_partial_session(bars, now)
     bars, quality = data.clean_bars(bars)
 
@@ -96,6 +114,7 @@ def run_select(s: Settings, offline: bool, now: datetime | None = None, fund: bo
     result = selection.run_selection(membership, picked, failures, s)
     book = backtest.fund_and_hold(result["core"], bars, decision_date, s) if fund else None
     risk_tables = run_risk(s, book, bars, price_cache, start, end, offline, now) if fund else {}
+    stress_tables = run_stress_tests(s, book, risk_tables, end, offline, now) if fund else {}
 
     run_dir = new_run_dir(s.runs_dir, now)
     for name in ["eligibility", "sector_quotas", "shortlist", "core", "reserves"]:
@@ -106,7 +125,7 @@ def run_select(s: Settings, offline: bool, now: datetime | None = None, fund: bo
     if book:
         for name in ["orders", "holdings", "ledger", "nav", "cost_scenarios"]:
             book[name].to_csv(run_dir / f"{name}.csv", index=False)
-    for name, table in risk_tables.items():
+    for name, table in {**risk_tables, **stress_tables}.items():
         table.to_csv(run_dir / f"{name}.csv", index=False)
     (run_dir / "settings.json").write_text(json.dumps(s.to_dict(), indent=2))
     meta = {
@@ -160,6 +179,16 @@ def run_select(s: Settings, offline: bool, now: datetime | None = None, fund: bo
             "beta": round(float(summary["beta"]), 3),
             "convention": risk.VAR_CONVENTION,
         }
+        sc = stress_tables["stress_scenarios"].dropna(subset=["pnl_usd"])
+        worst = {k: sc.loc[sc.loc[sc["kind"] == k, "pnl_usd"].idxmin()] for k in ("historical", "hypothetical")}
+        meta["stress"] = {
+            "method": "today's holdings shocked per scenario; cash unchanged; not an investable backtest",
+            "scenarios_run": len(sc),
+            "scenarios_without_data": int(stress_tables["stress_scenarios"]["pnl_usd"].isna().sum()),
+            **{f"worst_{k}": {"scenario": str(v["label"]), "pnl_usd": round(float(v["pnl_usd"]), 2),
+                              "pnl_pct_nav": round(float(v["pnl_pct_nav"]), 4)} for k, v in worst.items()},
+            "proxied_positions_total": int(sc["proxied_positions"].sum()),
+        }
     else:
         meta["notes"].append("Target weights only; run `stress-portfolio build` for holdings, cash and NAV.")
     (run_dir / "metadata.json").write_text(json.dumps(meta, indent=2))
@@ -193,6 +222,7 @@ def main(argv: list[str] | None = None) -> None:
         print(json.dumps({k: v for k, v in meta["portfolio"].items() if k not in ("event_order", "conventions")},
                          indent=2))
         print(json.dumps({k: v for k, v in meta["risk"].items() if k != "convention"}, indent=2))
+        print(json.dumps(meta["stress"], indent=2))
 
 
 if __name__ == "__main__":

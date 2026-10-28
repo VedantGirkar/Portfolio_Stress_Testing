@@ -3,6 +3,7 @@
 import hashlib
 import io
 import json
+import shutil
 import urllib.request
 import warnings
 from datetime import datetime, time
@@ -121,6 +122,13 @@ def download_prices(tickers: list[str], start: str, end: str, cache_dir: Path,
     bars = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=BAR_COLUMNS)
     bars["ticker"] = bars["ticker"].astype(str)
     return bars, pd.DataFrame(failures, columns=["ticker", "reason"])
+
+
+def prune_cache(cache_dir: Path, keep: str) -> None:
+    """Delete every dated cache folder except `keep`; each day's request window gets a new folder."""
+    for old in cache_dir.glob("*_*"):
+        if old.is_dir() and old.name != keep:
+            shutil.rmtree(old)
 
 
 def drop_partial_session(bars: pd.DataFrame, now: datetime | None = None) -> pd.DataFrame:

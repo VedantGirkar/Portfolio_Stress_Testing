@@ -129,3 +129,29 @@ def var_backtest(backtest: pd.DataFrame) -> go.Figure:
                             name=f"breach {col[4:]}")
     fig.update_layout(title="VaR backtest: each day's VaR from earlier days only", yaxis_title="USD")
     return _tidy(fig, height=420)
+
+
+def stress_bars(scenarios: pd.DataFrame) -> go.Figure:
+    df = scenarios.sort_values("pnl_pct_nav")
+    df = df.assign(type=df["kind"] + " / " + df["group"])
+    fig = px.bar(df, y="label", x="pnl_pct_nav", color="type", orientation="h",
+                 color_discrete_map={"historical / train": "#ef4444", "historical / validation": "#f59e0b",
+                                     "hypothetical / train": "#8b5cf6"},
+                 title="Loss of today's book in each scenario (% of NAV)")
+    hist = df.loc[df["kind"] == "historical"]
+    fig.add_scatter(x=hist["benchmark_return"], y=hist["label"], mode="markers", name="SPY in same window",
+                    marker=dict(symbol="diamond", color="#e2e8f0", size=9, line=dict(color="#0f172a", width=1)))
+    fig.update_layout(xaxis_tickformat=".0%", yaxis_title="", xaxis_title="")
+    return _tidy(fig, height=max(420, 26 * len(df)))
+
+
+def stress_attribution(positions: pd.DataFrame, label: str) -> go.Figure:
+    df = positions.sort_values("pnl_usd")
+    fig = px.bar(df, x="pnl_usd", y="ticker", color="source", orientation="h", title=f"P&L by holding: {label}")
+    return _tidy(fig.update_layout(xaxis_title="USD", yaxis_title=""))
+
+
+def stress_sector_attribution(sectors: pd.DataFrame) -> go.Figure:
+    df = sectors.sort_values("pnl_usd")
+    fig = px.bar(df, x="pnl_usd", y="sector", orientation="h", title="P&L by sector")
+    return _tidy(fig.update_traces(marker_color="#ef4444").update_layout(xaxis_title="USD", yaxis_title=""))

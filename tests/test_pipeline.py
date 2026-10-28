@@ -114,6 +114,16 @@ def test_build_funds_core_and_reconciles(tmp_path, offline_world):
     risk_meta = json.loads((run_dir / "metadata.json").read_text())["risk"]
     assert risk_meta["es_1d_99_usd"] >= risk_meta["var_1d_99_usd"] > 0
 
+    scenarios = pd.read_csv(run_dir / "stress_scenarios.csv").set_index("scenario")
+    assert scenarios.at["tariff2025", "available"]  # the only event inside the synthetic data
+    assert not scenarios.at["gfc", "available"]
+    positions = pd.read_csv(run_dir / "stress_positions.csv")
+    assert positions.groupby("scenario")["pnl_usd"].sum().round(6).to_dict() == \
+        scenarios["pnl_usd"].dropna().round(6).to_dict()
+    assert set(pd.read_csv(run_dir / "stress_download_failures.csv")["ticker"]) == {"XLB", "XLC", "XLE", "XLF",
+                                                                                  "XLI", "XLK", "XLP", "XLRE",
+                                                                                  "XLU", "XLV", "XLY"}
+
 
 def test_build_cannot_see_the_fill_day(tmp_path, offline_world):
     bars = offline_world
