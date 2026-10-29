@@ -169,9 +169,14 @@ def run_backtest(membership: pd.DataFrame, bars: pd.DataFrame, history: pd.DataF
             cost = float(costs.stock_costs(orders["order_qty"], px, s,
                                            split_factor=factor.loc[d].reindex(orders["ticker"]).fillna(1.0).values)
                          ["total_cost"].sum())
+        cur_loss = -(train[cur.index] @ cur)  # loss per training scenario (historical and hypothetical), % of NAV
         decision = rebalancing.decide(cur, w, status, mu, cov, sectors, cost, row["nav"], s,
-                                      current_stress_loss=float((-(train[cur.index] @ cur)).max()))
-        log("stress_aware", d, cur, w if len(w) else None, decision)
+                                      current_stress_loss=float(cur_loss.max()))
+        stress_log = {"stress_current": cur_loss.max(), "stress_current_scenario": cur_loss.idxmax()}
+        if len(w):
+            tgt_loss = -(train[w.index] @ w)
+            stress_log |= {"stress_target": tgt_loss.max(), "stress_target_scenario": tgt_loss.idxmax()}
+        log("stress_aware", d, cur, w if len(w) else None, decision | stress_log)
         return w if decision["action"] == "rebalance" else None
 
     policies = {"buy_and_hold": None, "equal_weight": equal_weight, "min_variance": min_variance,

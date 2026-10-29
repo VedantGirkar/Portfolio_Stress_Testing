@@ -95,7 +95,7 @@ class Settings:
     max_position_weight: float = 0.15  # of NAV
     max_sector_weight: float = 0.30  # of NAV
     min_position_weight: float = 0.01  # smaller positions are dropped and the problem re-solved
-    stress_loss_budget: float = 0.40  # stress-aware: every training scenario loses at most this share of NAV
+    stress_loss_budget: float = 0.35  # stress-aware: every training scenario loses at most this share of NAV
     frontier_points: int = 15
 
     # Rebalancing and backtest (equity-only until the hedge milestone; today's constituents, so survivorship-biased)

@@ -244,3 +244,26 @@ def rebalance_cumulative_costs(trades: pd.DataFrame) -> go.Figure:
     fig = px.line(df, x="fill_date", y="cumulative_cost", color="strategy", line_shape="hv",
                   title="Cumulative trading costs")
     return _tidy(fig.update_layout(yaxis_tickprefix="$", yaxis_title="USD", xaxis_title=""))
+
+
+def rebalance_stress(log: pd.DataFrame, budget: float) -> go.Figure:
+    """Worst training-scenario loss (historical or hypothetical) of the book at each review and of its target."""
+    fig = go.Figure()
+    for col, name, color in [("stress_current", "current book", "#94a3b8"), ("stress_target", "target", "#2563eb")]:
+        fig.add_scatter(x=log["date"], y=log[col], name=name, mode="lines", line=dict(color=color, width=2),
+                        customdata=log[f"{col}_scenario"],
+                        hovertemplate="%{y:.1%} in %{customdata}<extra>" + name + "</extra>")
+    moved = log.loc[log["action"] == "rebalance"]
+    fig.add_scatter(x=moved["date"], y=moved["stress_current"], name="rebalanced", mode="markers", hoverinfo="skip",
+                    marker=dict(size=8, color="rgba(0,0,0,0)", line=dict(color="#2563eb", width=1.5)))
+    fig.add_hline(y=budget, line_dash="dash", line_color="#ef4444", annotation_text=f"budget {budget:.0%}")
+    fig.update_layout(title="Worst stress-scenario loss at each review (% of NAV)", yaxis_tickformat=".0%",
+                      xaxis_title="", yaxis_title="loss")
+    return _tidy(fig)
+
+
+def stress_binding_scenarios(log: pd.DataFrame) -> go.Figure:
+    counts = log["stress_current_scenario"].value_counts().rename_axis("scenario").reset_index(name="reviews")
+    fig = px.bar(counts, y="scenario", x="reviews", orientation="h",
+                 title="Book's worst scenario (reviews)")
+    return _tidy(fig.update_traces(marker_color="#ef4444").update_yaxes(categoryorder="total ascending", title=""))

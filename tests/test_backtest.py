@@ -37,6 +37,9 @@ def test_strategies_share_start_and_reconcile(tmp_path):
     dec = out["bt_decisions"]
     assert set(dec["strategy"]) == {"equal_weight", "min_variance", "stress_aware"}  # buy-and-hold never reviews
     assert set(dec["date"]) == {REVIEW_1, REVIEW_2}
+    sa = dec.query("strategy == 'stress_aware'")
+    assert sa["stress_current"].notna().all() and sa["stress_current_scenario"].notna().all()
+    assert (sa["stress_target"].dropna() <= 0.6 + 1e-6).all()  # targets respect the stress budget
     assert set(out["bt_summary"]["strategy"]) == {*backtest.STRATEGIES, "SPY (reference)"}
     # review orders fill at the next session's open, never on the review day
     fills = out["bt_trades"].query("strategy == 'equal_weight'")["fill_date"].unique()

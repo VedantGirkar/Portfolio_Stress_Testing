@@ -371,6 +371,15 @@ with tabs[5]:
                             alt="After-cost gain at each review against the switching hurdle")
             st.caption("The target is adopted when its gain clears the hurdle, or whenever the current book breaks a "
                        "limit (those rebalances can sit below the line).")
+        if "stress_current" in log and log["stress_current"].notna().any():
+            left, right = st.columns([2, 1])
+            left.plotly_chart(charts.rebalance_stress(log, bt["settings"]["stress_loss_budget"]), width="stretch",
+                              alt="Worst stress-scenario loss of the book and its target at each review")
+            right.plotly_chart(charts.stress_binding_scenarios(log), width="stretch",
+                               alt="How often each stress scenario was the book's worst")
+            st.caption("Training scenarios only: historical crises known by the review date plus the hypothetical "
+                       "market, sector and combined shocks. The optimizer keeps the target inside the budget; a book "
+                       "that drifts past budget + drift band is rebalanced even without a return gain.")
         trades = bt["bt_trades"].query("strategy == @strategy")
         later = trades.loc[trades["fill_date"] > trades["fill_date"].min()]  # the initial purchase dwarfs the rest
         left, right = st.columns(2)
