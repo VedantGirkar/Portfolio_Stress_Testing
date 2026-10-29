@@ -381,6 +381,8 @@ with tabs[5]:
                               width="stretch", alt=f"Traded value per rebalance of the {strategy} strategy")
         right.plotly_chart(charts.rebalance_cumulative_costs(bt["bt_trades"].query("strategy != 'buy_and_hold'")),
                            width="stretch", alt="Cumulative trading costs of each rebalancing strategy")
+        st.caption("Traded value counts buys and sells separately, so replacing the whole book shows as about 200%. "
+                   "Cumulative costs include each strategy's initial purchase.")
         if not bt["bt_dropped"].empty:
             with st.expander(f"Shortlisted stocks skipped at some reviews ({len(bt['bt_dropped'])})"):
                 st.dataframe(bt["bt_dropped"], hide_index=True, alt="Stocks without a full price window at a review")

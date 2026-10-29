@@ -242,5 +242,5 @@ def rebalance_cumulative_costs(trades: pd.DataFrame) -> go.Figure:
     df = trades.groupby(["strategy", "fill_date"], as_index=False)["total_cost"].sum().sort_values("fill_date")
     df["cumulative_cost"] = df.groupby("strategy")["total_cost"].cumsum()
     fig = px.line(df, x="fill_date", y="cumulative_cost", color="strategy", line_shape="hv",
-                  title="Cumulative trading costs (including the initial purchase)")
+                  title="Cumulative trading costs")
     return _tidy(fig.update_layout(yaxis_tickprefix="$", yaxis_title="USD", xaxis_title=""))
