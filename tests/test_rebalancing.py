@@ -16,10 +16,17 @@ def _est(mu=(0.10, 0.10, 0.10)):
 
 def test_quarter_ends_only_completed_quarters():
     cal = pd.bdate_range("2023-12-20", "2024-07-10")
-    ends = rb.quarter_end_sessions(cal, pd.Timestamp("2023-12-31"))
+    ends = rb.period_end_sessions(cal, pd.Timestamp("2023-12-31"), "Q")
     assert list(ends) == [pd.Timestamp("2024-03-29"), pd.Timestamp("2024-06-28")]
     partial = pd.bdate_range("2024-01-02", "2024-06-28")  # data ends on a quarter's last day
-    assert list(rb.quarter_end_sessions(partial, pd.Timestamp("2024-01-01"))) == [pd.Timestamp("2024-03-29")]
+    assert list(rb.period_end_sessions(partial, pd.Timestamp("2024-01-01"), "Q")) == [pd.Timestamp("2024-03-29")]
+
+
+def test_month_ends_only_completed_months():
+    cal = pd.bdate_range("2024-01-02", "2024-04-30")  # data ends on April's last day, so April is not a review
+    ends = rb.period_end_sessions(cal, pd.Timestamp("2024-01-01"), "M")
+    # March 2024 ends on a Sunday: its review is Friday 03-29
+    assert list(ends) == [pd.Timestamp("2024-01-31"), pd.Timestamp("2024-02-29"), pd.Timestamp("2024-03-29")]
 
 
 def test_same_book_is_kept(tmp_path):

@@ -13,7 +13,7 @@ See `PROJECT_SPECIFICATION.md` for the full specification and `CLAUDE.md` for wo
 | 3. Risk and dashboard | Implemented: historical and normal VaR/ES, volatility, drawdown, beta vs SPY, risk contributions, correlations, VaR backtest |
 | 4. Stress testing | Implemented for stocks: 10 historical events replayed since 2000, market/sector/combined shocks, position and sector attribution, train/validation tags |
 | 5. Optimization | Implemented: equal-weight, minimum-variance, mean-variance and stress-aware candidates for 10/20/30-stock universes (cvxpy), efficient frontier, stress-vs-return trade-off, cost estimates |
-| 6. Rebalancing and preliminary backtest | Implemented: quarterly decision policy, walk-forward backtest 2016–today of buy-and-hold, equal-weight, minimum-variance and stress-aware strategies (equity-only, survivorship-biased) |
+| 6. Rebalancing and preliminary backtest | Implemented: monthly decision policy (configurable `rebalance_frequency`), walk-forward backtest 2016–today of buy-and-hold, equal-weight, minimum-variance and stress-aware strategies (equity-only, survivorship-biased) |
 | 7–10. Hedge decision, hedging, hedged backtest, final validation | Not started |
 
 ## Setup
@@ -53,7 +53,7 @@ Selects the core as of the previous completed session, buys it with simulated ca
 uv run stress-portfolio backtest
 ```
 
-Picks the starting core and 100-stock shortlist as of the last session before `backtest_start` (2016-01-01), then runs four strategies to the latest session with the same capital, fills and costs: buy-and-hold, quarterly equal-weight, quarterly minimum-variance, and the stress-aware policy (switch only when the book breaks a limit or the after-cost gain is at least 0.5% a year). Every quarterly review uses only data up to its own close, including which historical crises it knows about. Writes `bt_nav.csv`, `bt_trades.csv`, `bt_decisions.csv`, `bt_summary.csv`, `bt_initial_core.csv` and `bt_dropped.csv`. Downloads daily prices since 2013 for every current member (cached in `data/raw/backtest/`).
+Picks the starting core and 100-stock shortlist as of the last session before `backtest_start` (2016-01-01), then runs four strategies to the latest session with the same capital, fills and costs: buy-and-hold, monthly equal-weight, monthly minimum-variance, and the stress-aware policy (switch only when the book breaks a limit or the after-cost gain is at least 0.5% a year). Every month-end review (`rebalance_frequency = "M"`; `"Q"` for quarterly) uses only data up to its own close, including which historical crises it knows about. Writes `bt_nav.csv`, `bt_trades.csv`, `bt_decisions.csv`, `bt_summary.csv`, `bt_initial_core.csv` and `bt_dropped.csv`. Downloads daily prices since 2013 for every current member (cached in `data/raw/backtest/`).
 
 ## Dashboard
 

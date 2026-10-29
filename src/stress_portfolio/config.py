@@ -103,6 +103,7 @@ class Settings:
     backtest_history_start: str = "2013-01-01"  # enough sessions for eligibility at the start
     backtest_universe_size: int = 20  # stocks the optimized strategies may use at each review
     backtest_estimation_sessions: int = 756  # about 3 years of returns for each review's estimates
+    rebalance_frequency: str = "M"  # pandas period code for scheduled reviews: "M" month-end, "Q" quarter-end
     rebalance_min_improvement: float = 0.005  # annual utility gain after costs needed to switch
     rebalance_drift_band: float = 0.02  # a limit only counts as broken once drift passes it by this much
 

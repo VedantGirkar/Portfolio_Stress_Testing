@@ -276,18 +276,19 @@ def run_backtest_cmd(s: Settings, offline: bool, now: datetime | None = None) ->
     failures.to_csv(run_dir / "download_failures.csv", index=False)
     quality.to_csv(run_dir / "data_quality.csv", index=False)
     (run_dir / "settings.json").write_text(json.dumps(s.to_dict(), indent=2))
+    period = {"M": "month", "Q": "quarter"}.get(s.rebalance_frequency, f"'{s.rebalance_frequency}' period")
     meta = {
         "run_id": run_dir.name, "workflow": "backtest", "created_at": now.isoformat(timespec="seconds"),
         "git_revision": git_revision(), "data_mode": "offline cache" if offline else "live download",
         "label": backtest.BIAS_LABEL,
         "start_decision": str(out["start"].date()), "end": str(out["bt_nav"]["date"].max().date()),
         "reviews": out["reviews"], "strategies": list(backtest.STRATEGIES),
-        "policy": {"schedule": "last session of each completed quarter; orders fill at the next open",
+        "policy": {"schedule": f"last session of each completed {period}; orders fill at the next open",
                    "stress_aware": f"switch if after-cost utility gain >= {s.rebalance_min_improvement:.2%}/yr or the "
                                    f"book breaks a position, sector or stress limit by more than {s.rebalance_drift_band:.0%} "
                                    "(scenarios known by the review)",
-                   "equal_weight": "reset the starting core to equal weights every quarter",
-                   "min_variance": f"minimum variance over a {s.backtest_universe_size}-stock universe every quarter",
+                   "equal_weight": f"reset the starting core to equal weights every {period}",
+                   "min_variance": f"minimum variance over a {s.backtest_universe_size}-stock universe every {period}",
                    "buy_and_hold": "starting core, never traded again"},
         "universe": "starting 100-stock shortlist fixed for the whole backtest, re-scored at each review",
         "membership": member_meta, "event_order": list(backtest.EVENT_ORDER),

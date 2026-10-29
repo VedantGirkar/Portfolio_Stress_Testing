@@ -14,11 +14,12 @@ TOL = 1e-6
 HEDGE_REVIEW = "not applicable: hedge method undecided (milestone 7)"
 
 
-def quarter_end_sessions(calendar: pd.DatetimeIndex, after: pd.Timestamp) -> pd.DatetimeIndex:
-    """Last session of each completed quarter after `after`: a session whose next session is in a new
-    quarter. The final session in the data is never a review, since its quarter may not be over."""
+def period_end_sessions(calendar: pd.DatetimeIndex, after: pd.Timestamp, freq: str) -> pd.DatetimeIndex:
+    """Last session of each completed period (pandas period code, e.g. "M" or "Q") after `after`: a session
+    whose next session is in a new period. The final session in the data is never a review, since its period
+    may not be over."""
     cal = calendar[calendar > after]
-    q = cal.to_period("Q")
+    q = cal.to_period(freq)
     return cal[:-1][q[:-1] != q[1:]]
 
 

@@ -28,9 +28,11 @@ def backtest_runs() -> list[Path]:
 @st.cache_data(max_entries=8)
 def load_backtest(path: str) -> dict:
     p = Path(path)
-    tables = {n: pd.read_csv(p / f"{n}.csv", parse_dates=["date"] if n in ("bt_nav", "bt_decisions") else None)
+    dates = {"bt_nav": ["date"], "bt_decisions": ["date"], "bt_trades": ["fill_date"]}
+    tables = {n: pd.read_csv(p / f"{n}.csv", parse_dates=dates.get(n))
               for n in ["bt_nav", "bt_trades", "bt_decisions", "bt_summary", "bt_initial_core", "bt_dropped"]}
     tables["meta"] = json.loads((p / "metadata.json").read_text())
+    tables["settings"] = json.loads((p / "settings.json").read_text())
     return tables
 
 
@@ -346,7 +348,7 @@ with tabs[5]:
     else:
         bm, dec = bt["meta"], bt["bt_decisions"]
         st.warning(f"Results are {bm['label']}.", title="Preliminary backtest", icon=":material/warning:")
-        st.caption(f"Quarterly reviews from {bm['start_decision']} to {bm['end']} ({bm['reviews']} reviews). "
+        st.caption(f"Reviews from {bm['start_decision']} to {bm['end']} ({bm['reviews']} reviews). "
                    f"{bm['policy']['schedule'].capitalize()}. Stress-aware rule: {bm['policy']['stress_aware']}.")
         strategy = st.segmented_control("Strategy", ["stress_aware", "min_variance", "equal_weight"],
                                         default="stress_aware", required=True)
@@ -363,6 +365,22 @@ with tabs[5]:
                                     "cost_usd": st.column_config.NumberColumn("est. cost", format="dollar")})
         st.caption("Hedge reviews are logged separately from stock decisions; they start once the hedge method is "
                    "chosen (milestone 7).")
+
+        if log["improvement"].notna().any():
+            st.plotly_chart(charts.rebalance_gains(log, bt["settings"]["rebalance_min_improvement"]), width="stretch",
+                            alt="After-cost gain at each review against the switching hurdle")
+            st.caption("The target is adopted when its gain clears the hurdle, or whenever the current book breaks a "
+                       "limit (those rebalances can sit below the line).")
+        trades = bt["bt_trades"].query("strategy == @strategy")
+        later = trades.loc[trades["fill_date"] > trades["fill_date"].min()]  # the initial purchase dwarfs the rest
+        left, right = st.columns(2)
+        if later.empty:
+            left.info("This strategy never traded after its initial purchase.")
+        else:
+            left.plotly_chart(charts.rebalance_turnover(later, bt["bt_nav"].query("strategy == @strategy")),
+                              width="stretch", alt=f"Traded value per rebalance of the {strategy} strategy")
+        right.plotly_chart(charts.rebalance_cumulative_costs(bt["bt_trades"].query("strategy != 'buy_and_hold'")),
+                           width="stretch", alt="Cumulative trading costs of each rebalancing strategy")
         if not bt["bt_dropped"].empty:
             with st.expander(f"Shortlisted stocks skipped at some reviews ({len(bt['bt_dropped'])})"):
                 st.dataframe(bt["bt_dropped"], hide_index=True, alt="Stocks without a full price window at a review")

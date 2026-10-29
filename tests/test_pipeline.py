@@ -191,7 +191,8 @@ def test_backtest_command_writes_labelled_run(tmp_path, offline_world):
         assert (run_dir / f"{name}.csv").exists(), name
     meta = json.loads((run_dir / "metadata.json").read_text())
     assert meta["workflow"] == "backtest" and "survivorship-biased" in meta["label"]
-    assert meta["reviews"] == 2  # 2025-03-31 and 2025-06-30 (its next session, 07-01, starts a new quarter)
+    assert meta["reviews"] == 4  # month-ends 03-31 to 06-30 (06-30's next session, 07-01, starts a new month)
+    assert "each completed month" in meta["policy"]["schedule"]
     assert not (run_dir / "core.csv").exists()  # backtest runs stay out of the build/select run list
     offline = main.run_backtest_cmd(s, offline=True, now=NOW)  # cached rerun gives the same result
     pd.testing.assert_frame_equal(pd.read_csv(run_dir / "bt_summary.csv"), pd.read_csv(offline / "bt_summary.csv"))

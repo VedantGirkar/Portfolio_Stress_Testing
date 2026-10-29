@@ -213,3 +213,34 @@ def bt_holdings(nav: pd.DataFrame) -> go.Figure:
     fig = px.line(nav.dropna(subset=["holdings"]), x="date", y="holdings", color="strategy", line_shape="hv",
                   title="Stocks held")
     return _tidy(fig.update_layout(yaxis_title="", xaxis_title=""))
+
+
+ACTION_COLORS = {"rebalance": "#2563eb", "hold": "#94a3b8"}
+
+
+def rebalance_gains(log: pd.DataFrame, hurdle: float) -> go.Figure:
+    df = log.dropna(subset=["improvement"])
+    fig = px.bar(df, x="date", y="improvement", color="action", color_discrete_map=ACTION_COLORS,
+                 hover_data=["reason"], title="After-cost utility gain of the target at each review")
+    fig.add_hline(y=hurdle, line_dash="dash", line_color="#ef4444", annotation_text=f"hurdle {hurdle:.2%}")
+    return _tidy(fig.update_layout(yaxis_tickformat=".1%", yaxis_title="annual gain", xaxis_title=""))
+
+
+def rebalance_turnover(trades: pd.DataFrame, nav: pd.DataFrame) -> go.Figure:
+    """Traded value per rebalance as % of that day's closing NAV, split into buys and sells."""
+    df = trades.assign(value=trades["filled_qty"].fillna(0).abs() * trades["fill_price"].fillna(0),
+                       side=lambda t: t["filled_qty"].gt(0).map({True: "buys", False: "sells"}))
+    df = df.groupby(["fill_date", "side"], as_index=False)["value"].sum()
+    df = df.merge(nav[["date", "nav"]], left_on="fill_date", right_on="date")
+    fig = px.bar(df.assign(turnover=df["value"] / df["nav"]), x="fill_date", y="turnover", color="side",
+                 color_discrete_map={"buys": "#22c55e", "sells": "#ef4444"}, hover_data={"value": ":$,.0f"},
+                 title="Traded value per rebalance (% of NAV)")
+    return _tidy(fig.update_layout(yaxis_tickformat=".0%", yaxis_title="", xaxis_title=""))
+
+
+def rebalance_cumulative_costs(trades: pd.DataFrame) -> go.Figure:
+    df = trades.groupby(["strategy", "fill_date"], as_index=False)["total_cost"].sum().sort_values("fill_date")
+    df["cumulative_cost"] = df.groupby("strategy")["total_cost"].cumsum()
+    fig = px.line(df, x="fill_date", y="cumulative_cost", color="strategy", line_shape="hv",
+                  title="Cumulative trading costs (including the initial purchase)")
+    return _tidy(fig.update_layout(yaxis_tickprefix="$", yaxis_title="USD", xaxis_title=""))

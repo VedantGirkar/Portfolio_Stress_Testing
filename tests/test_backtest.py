@@ -18,7 +18,7 @@ def _world():
 
 def _settings(tmp_path, **kw):
     return make_settings(tmp_path, backtest_start="2025-03-15", backtest_universe_size=10,
-                         backtest_estimation_sessions=200, stress_loss_budget=0.6,
+                         backtest_estimation_sessions=200, stress_loss_budget=0.6, rebalance_frequency="Q",
                          stress_events=(("tariff", "Test event", "2025-03-15", "2025-04-30", "validation"),), **kw)
 
 

@@ -44,7 +44,7 @@ The starter used a current Wikipedia constituent table and Yahoo data through yf
 | Currency | USD initially |
 | Cash | Explicit, including hedge and cost funding |
 | Equity leverage | Disabled initially |
-| Scheduled stock rebalancing | Quarterly proposed default |
+| Scheduled stock rebalancing | Monthly default (configurable; quarterly also supported) |
 | Risk-triggered stock rebalancing | Added after scheduled behavior is validated |
 | Hedge adjustment frequency | Separate configurable policy, decided with hedge method |
 | Derivatives hedge | Required; delta or gamma approach decided later |
@@ -259,7 +259,7 @@ Tests: feasible budgets/limits, known small problems, infeasible problems, cost 
 
 ### 5.10 `src/stress_portfolio/rebalancing.py` — Decision policy
 
-Decide whether, when, and how to change positions. Begin with scheduled quarterly stock decisions; add risk triggers only after validating the schedule.
+Decide whether, when, and how to change positions. Begin with scheduled monthly stock decisions; add risk triggers only after validating the schedule.
 
 Compare current holdings and proposed candidates after costs, hedge changes, and configured improvement thresholds. Keeping the current portfolio is a valid decision.
 
@@ -326,7 +326,7 @@ Coordinate modules without reimplementing their formulas. Maintain estimation, d
 
 At each event, process the defined corporate-action/settlement order, value positions, update available information, make eligible decisions, execute orders, apply fills, and record state. Document event ordering rather than relying on accidental loop order.
 
-Include stock decisions, hedge maintenance, option expiry, dividends, and daily valuation as relevant events. Do not equate hedge adjustment frequency with quarterly stock rebalancing.
+Include stock decisions, hedge maintenance, option expiry, dividends, and daily valuation as relevant events. Do not equate hedge adjustment frequency with the stock-rebalancing schedule.
 
 Benchmarks:
 

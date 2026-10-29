@@ -104,7 +104,7 @@ def run_backtest(membership: pd.DataFrame, bars: pd.DataFrame, history: pd.DataF
     tickers = short["provider_ticker"].tolist()
     sectors = short.set_index("provider_ticker")["sector"]
     initial = sel["core"].set_index("provider_ticker")["target_weight"] * (1 - s.cash_reserve)
-    reviews = rebalancing.quarter_end_sessions(cal, start)
+    reviews = rebalancing.period_end_sessions(cal, start, s.rebalance_frequency)
     bench = history[s.benchmark_ticker]
     factor = future_split_factor(bars)
     k = s.backtest_universe_size
