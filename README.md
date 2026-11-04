@@ -14,7 +14,8 @@ See `PROJECT_SPECIFICATION.md` for the full specification and `CLAUDE.md` for wo
 | 4. Stress testing | Implemented for stocks: 10 historical events replayed since 2000, market/sector/combined shocks, position and sector attribution, train/validation tags |
 | 5. Optimization | Implemented: equal-weight, minimum-variance, mean-variance and stress-aware candidates for 10/20/30-stock universes (cvxpy), efficient frontier, stress-vs-return trade-off, cost estimates |
 | 6. Rebalancing and preliminary backtest | Implemented: monthly decision policy (configurable `rebalance_frequency`), walk-forward backtest 2016–today of buy-and-hold, equal-weight, minimum-variance and stress-aware strategies (equity-only, survivorship-biased) |
-| 7–10. Hedge decision, hedging, hedged backtest, final validation | Not started |
+| 7. Hedge decision | Decided: delta-based, long SPY puts, worst training stress ≤ 35% NAV, premium ≤ 3% NAV/year, Cboe DataShop SPY option EOD data (see `PROJECT_SPECIFICATION.md` §5.11 decision record) |
+| 8–10. Hedging, hedged backtest, final validation | Not started; hedging needs the Cboe SPY option files in `data/raw/` first |
 
 ## Setup
 

@@ -273,7 +273,34 @@ Tests: correct scheduled dates, no-action outcome, cost thresholds, constraint b
 
 ### 5.11 `src/stress_portfolio/hedging.py` — Mandatory derivative hedge
 
-This module is required for final completion. Its method remains undecided until its implementation stage.
+This module is required for final completion.
+
+#### Decision record (milestone 7, 2026-11-03)
+
+Chosen by the user after the gate discussion. Numbers are from build run `20261028-190314-98b6d0` (modeled from history, not realized).
+
+| Item | Decision |
+|---|---|
+| Method | Delta-based. Not gamma: the long-only stock book has zero gamma to neutralize. |
+| Exposure hedged | Market exposure: beta-adjusted dollar delta of the whole book vs SPY (beta 0.63, about $630k on $1.0M NAV; correlation 0.72, so the hedge is mismatched and gives no guaranteed floor). |
+| Instruments | Long SPY puts only. No short stock, short futures, short options or financing (long-only, unlevered mandate). |
+| Contract conventions | SPY: American exercise, physical settlement. The data has no multiplier or deliverable field, so only standard root `SPY` contracts (OCC standard: 100 shares) are eligible. Non-standard roots ending in a digit (adjusted contracts) are excluded and logged, never assumed to be 100. SPX rejected: one contract (about $650k notional) is too coarse for this book. |
+| Objective | Partial downside reduction, not neutrality. Size puts so the worst training stress scenario, fully repriced, stays within `stress_loss_budget` (35% NAV). Currently breached unhedged: GFC -54%, COVID -40%. |
+| Premium budget | At most 3% of NAV per year. Hedge cash is reserved before equity purchases. If the target cannot be met within budget, hedge partially and report the residual breach. |
+| Data mode | Historical-market mode. Synthetic mode is not approved. yfinance only lists current chains (checked 2026-11-03), so milestone 8 needs the purchased files first. |
+| Data source | Cboe DataShop Option EOD Summary (layout v1.1), SPY only, with Calcs, from 2015-12-01. One zipped CSV per day (`UnderlyingOptionsEODCalcs_YYYY-MM-DD.zip`), stored under `data/raw/` and not committed. Fields used: NBBO bid/ask at 15:45 and at the close, `implied_volatility_1545` and the 15:45 Greeks, open interest. |
+| Data handling | IV of 0 means missing (no quotes, price below intrinsic, or above Cboe's cap), never zero volatility. A zero bid is a real quote: the put can't be sold for value. Cboe's IV/Greek model inputs are not documented, so their values are labeled vendor-observed; our own repricing uses a documented model. On early-close days the "1545" snapshot is taken at 12:45 ET. |
+
+Proposed defaults, to confirm when milestone 8 starts:
+
+- Expiry: a listed expiry at least the next monthly review plus 2 weeks ahead.
+- Review: close, roll or resize at each monthly review, and re-check the hedge after every stock change.
+- Triggers: an extra review when net beta-delta drifts more than 10% of NAV from target.
+- Exercise: no early exercise; close puts before expiry.
+
+Open for milestone 8: hedge fill timing. Stock trades fill at the next session's open, but the data has no option quote at the open. One possible convention is to decide at the close and fill at the next session's 15:45 ask (buy) or bid (sell).
+
+Open for milestone 9: whether the stress-aware optimizer sees hedged stress losses, which would overlap the hedge with the 35% budget constraint.
 
 #### Decision gate before implementation
 
