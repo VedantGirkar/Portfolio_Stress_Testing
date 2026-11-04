@@ -14,7 +14,8 @@ from dashboard import charts  # noqa: E402
 from stress_portfolio.config import Settings  # noqa: E402
 
 RUNS_DIR = Path(os.environ.get("STRESS_PORTFOLIO_RUNS_DIR", Settings().runs_dir))
-HEDGING_PENDING = "milestones 7–8 — delta or gamma hedge (method not chosen yet)"
+HEDGING_PENDING = ("milestone 8. Method chosen: delta hedge with long SPY puts (worst stress ≤ 35% of NAV, "
+                   "premium ≤ 3% of NAV a year). Waiting on historical SPY option data from Cboe DataShop")
 TABLE_COLS = ["ticker", "company", "sector", "investment_score", "momentum", "downside_dev_annual",
               "max_drawdown", "median_dollar_volume", "reason"]
 
