@@ -231,3 +231,65 @@ def load_option_quotes(paths: list[Path], s) -> tuple[pd.DataFrame, pd.DataFrame
     q["iv_source"] = "Cboe 15:45 (vendor-observed)"
     return q[cols].sort_values(["quote_date", "expiration", "strike", "option_type"]).reset_index(drop=True), \
         pd.DataFrame(quality)
+
+
+def download_option_chain(underlying: str, max_days: int, today) -> pd.DataFrame:
+    """Raw yfinance put chains for expiries within `max_days`; kept tiny so tests can replace it."""
+    import yfinance as yf
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        t = yf.Ticker(underlying)
+        last = pd.Timestamp(today) + pd.Timedelta(days=max_days)
+        frames = [t.option_chain(e).puts.assign(expiration=e) for e in t.options if pd.Timestamp(e) <= last]
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
+def normalize_yf_chain(raw: pd.DataFrame, s, fetched_at) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """yfinance puts in the same shape as load_option_quotes, plus a data-quality table.
+
+    The root is read from the right end of the OCC symbol (the last 15 characters are date, type and strike), so
+    adjusted roots such as SPY1 are recognized. Only the standard root with contractSize REGULAR is kept. A missing
+    or non-positive bid/ask stays missing (never replaced by the last trade); IV outside (0, 5] becomes missing.
+    Quotes are delayed and unofficial: yfinance, not an exchange feed.
+    """
+    from .hedging import contract_id
+
+    cols = ["quote_date", "fetched_at", "root", "expiration", "strike", "option_type", "bid", "ask", "iv",
+            "last_trade", "open_interest", "multiplier", "contract", "iv_source"]
+    if raw.empty:
+        return pd.DataFrame(columns=cols), pd.DataFrame([{"root": None, "rows": 0, "action": "empty chain"}])
+    sym = raw["contractSymbol"].astype(str)
+    df = pd.DataFrame({"root": sym.str[:-15], "expiration": pd.to_datetime(sym.str[-15:-9], format="%y%m%d"),
+                       "option_type": sym.str[-9], "strike": sym.str[-8:].astype(int) / 1000,
+                       "bid": raw["bid"].where(raw["bid"] >= 0), "ask": raw["ask"].where(raw["ask"] > 0),
+                       "iv": raw["impliedVolatility"].where((raw["impliedVolatility"] > 0) & (raw["impliedVolatility"] <= 5)),
+                       "last_trade": raw.get("lastTradeDate"), "open_interest": raw.get("openInterest"),
+                       "size": raw.get("contractSize", pd.Series("REGULAR", index=raw.index))})
+    bad = (df["root"] != s.hedge_root) | (df["size"] != "REGULAR")
+    quality = (df.loc[bad].groupby(["root", "size"]).size().rename("rows").reset_index()
+               .assign(action="excluded: non-standard contract, deliverable unknown"))
+    df = df.loc[~bad].drop(columns="size")
+    ts = pd.Timestamp(fetched_at)
+    df["quote_date"], df["fetched_at"] = ts.tz_localize(None).normalize() if ts.tz else ts.normalize(), ts.isoformat()
+    df["multiplier"] = s.standard_option_multiplier
+    df["contract"] = [contract_id(r, e, t, k) for r, e, t, k in zip(df["root"], df["expiration"], df["option_type"],
+                                                                     df["strike"])]
+    df["iv_source"] = "yfinance (delayed, unofficial)"
+    return df[cols].sort_values(["expiration", "strike"]).reset_index(drop=True), quality
+
+
+def fetch_option_chain(s, cache_dir: Path, offline: bool, now: datetime) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Today's hedge-underlying put chain from yfinance, cached as CSV; offline reuses the newest cached snapshot."""
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    if offline:
+        snaps = sorted(cache_dir.glob(f"{s.hedge_underlying}_*.csv"))
+        if not snaps:
+            return pd.DataFrame(), pd.DataFrame([{"root": None, "rows": 0, "action": "no cached chain (offline)"}])
+        chain = pd.read_csv(snaps[-1], parse_dates=["quote_date", "expiration"])
+        return chain, pd.DataFrame(columns=["root", "size", "rows", "action"])
+    raw = download_option_chain(s.hedge_underlying, s.option_chain_max_days, now.date())
+    chain, quality = normalize_yf_chain(raw, s, now)
+    if not chain.empty:
+        chain.to_csv(cache_dir / f"{s.hedge_underlying}_{now:%Y%m%d-%H%M%S}.csv", index=False)
+    return chain, quality

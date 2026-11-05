@@ -161,3 +161,36 @@ def test_option_loader_requires_calcs_columns(tmp_path):
                       drop=["implied_volatility_1545", "delta_1545", "active_underlying_price_1545"])
     with pytest.raises(ValueError, match="with Calcs"):
         data.load_option_quotes([path], make_settings(tmp_path))
+
+
+def test_yfinance_chain_keeps_standard_contracts_and_real_quotes(tmp_path):
+    from .conftest import make_settings
+    s = make_settings(tmp_path)
+    raw = pd.DataFrame({
+        "contractSymbol": ["SPY261218P00734000", "SPY1261218P00734000", "SPY261218P00700000", "SPY261218P00650000"],
+        "bid": [5.0, 5.0, 0.0, 1.0], "ask": [5.1, 5.1, 0.0, 1.1], "lastPrice": [9.0, 9.0, 9.0, 9.0],
+        "impliedVolatility": [0.18, 0.18, 1e-5, 0.0], "lastTradeDate": [None] * 4, "openInterest": [1] * 4,
+        "contractSize": ["REGULAR"] * 4})
+    chain, quality = data.normalize_yf_chain(raw, s, datetime(2026, 11, 4, 18, 0, tzinfo=data.NY))
+    assert list(quality["root"]) == ["SPY1"] and quality["rows"].iloc[0] == 1
+    assert list(chain["strike"]) == [650.0, 700.0, 734.0]
+    row = chain.set_index("strike").loc[734.0]
+    assert row["contract"] == "SPY 2026-12-18 P 734.00" and row["expiration"] == pd.Timestamp("2026-12-18")
+    assert row["multiplier"] == 100 and row["quote_date"] == pd.Timestamp("2026-11-04")
+    zero = chain.set_index("strike").loc[700.0]
+    assert zero["bid"] == 0.0 and np.isnan(zero["ask"])  # never replaced by the 9.0 last trade
+    assert np.isnan(chain.set_index("strike").loc[650.0, "iv"])
+    assert data.normalize_yf_chain(pd.DataFrame(), s, datetime(2026, 11, 4))[0].empty
+
+
+def test_option_chain_cache_round_trips_offline(tmp_path, monkeypatch):
+    from .conftest import make_settings
+    s = make_settings(tmp_path)
+    cache = tmp_path / "options"
+    assert data.fetch_option_chain(s, cache, True, datetime(2026, 11, 4))[0].empty  # nothing cached yet
+    raw = pd.DataFrame({"contractSymbol": ["SPY261218P00734000"], "bid": [5.0], "ask": [5.1], "impliedVolatility": [0.18],
+                        "lastTradeDate": [None], "openInterest": [1], "contractSize": ["REGULAR"]})
+    monkeypatch.setattr(data, "download_option_chain", lambda *a: raw)
+    live = data.fetch_option_chain(s, cache, False, datetime(2026, 11, 4, 18))[0]
+    offline = data.fetch_option_chain(s, cache, True, datetime(2026, 11, 5))[0]
+    assert offline.iloc[0]["contract"] == live.iloc[0]["contract"] and offline.iloc[0]["ask"] == 5.1

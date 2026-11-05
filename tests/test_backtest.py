@@ -73,7 +73,9 @@ def test_backtest_is_repeatable(tmp_path):
     pd.testing.assert_frame_equal(a["bt_nav"], b["bt_nav"])
 
 
-def test_hedged_strategy_cannot_run_without_its_hedge(tmp_path):
+def test_backtest_never_reports_a_hedged_strategy_before_it_exists(tmp_path):
     membership, bars = _world()
-    with pytest.raises(NotImplementedError, match="hedge"):
-        backtest.run_backtest(membership, bars, wide(bars, "adj_close"), _settings(tmp_path, hedge_method="delta"))
+    out = backtest.run_backtest(membership, bars, wide(bars, "adj_close"), _settings(tmp_path, hedge_method="delta"))
+    assert set(out["bt_nav"]["strategy"]) == set(backtest.STRATEGIES) | {"SPY (reference)"}
+    assert not any("hedge" in name for name in out["bt_nav"]["strategy"].unique())
+    assert backtest.HEDGED_STRATEGY_STATUS.startswith("not implemented")

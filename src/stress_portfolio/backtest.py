@@ -24,6 +24,8 @@ EVENT_ORDER = ("1. dividends/splits for shares held at the prior close",
                "3. valuation at the session close",
                "4. scheduled reviews at the close; their orders fill at the next session's open")
 STRATEGIES = ("buy_and_hold", "equal_weight", "min_variance", "stress_aware")
+# The final hedged strategy must never be silently replaced by these unhedged benchmarks: every run says it is absent.
+HEDGED_STRATEGY_STATUS = "not implemented (milestone 9): needs Cboe historical option data"
 BIAS_LABEL = "equity-only, preliminary, survivorship-biased (today's constituents replayed into the past)"
 
 
@@ -82,6 +84,9 @@ def fund_and_hold(core: pd.DataFrame, bars: pd.DataFrame, decision_date: pd.Time
         "ledger": p.ledger(),
         "nav": run["nav"],
         "cost_scenarios": scenario_summary(orders["filled_qty"], orders["ref_price"].fillna(0.0), s),
+        "portfolio": p,
+        "marks": wide(bars, "close").ffill().iloc[-1],
+        "valuation_date": run["nav"].iloc[-1]["date"],
     }
 
 
@@ -92,8 +97,6 @@ def run_backtest(membership: pd.DataFrame, bars: pd.DataFrame, history: pd.DataF
     history: wide adj_close since stress_history_start for at least the starting shortlist, the benchmark and
     the sector ETFs (stress replays). Every review uses only data up to its own close.
     """
-    if s.hedge_method != "undecided":
-        raise NotImplementedError("a hedged strategy needs the hedging milestone; it must not run without its hedge")
     adj = wide(bars, "adj_close")
     cal = session_calendar(adj)
     adj, close, volume = adj.reindex(cal), wide(bars, "close").reindex(cal), wide(bars, "volume").reindex(cal)

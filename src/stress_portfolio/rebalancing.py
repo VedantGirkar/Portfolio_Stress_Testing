@@ -11,7 +11,7 @@ import pandas as pd
 from .config import Settings
 
 TOL = 1e-6
-HEDGE_REVIEW = "not applicable: hedge method undecided (milestone 7)"
+HEDGE_REVIEW = "not applicable: equity-only strategy (hedged strategy arrives in milestone 9)"
 
 
 def period_end_sessions(calendar: pd.DatetimeIndex, after: pd.Timestamp, freq: str) -> pd.DatetimeIndex:

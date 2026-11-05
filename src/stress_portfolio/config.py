@@ -107,9 +107,10 @@ class Settings:
     rebalance_min_improvement: float = 0.005  # annual utility gain after costs needed to switch
     rebalance_drift_band: float = 0.02  # a limit only counts as broken once drift passes it by this much
 
-    # Hedge (decided at milestone 7; a full-strategy run must reject "undecided"). Long SPY puts only, sized so the
-    # worst training stress scenario stays within stress_loss_budget; see PROJECT_SPECIFICATION.md 5.11.
-    hedge_method: str = "undecided"
+    # Hedge (milestone 7 decision: delta, long SPY puts only, sized so the worst training stress scenario stays within
+    # stress_loss_budget; see PROJECT_SPECIFICATION.md 5.11). `build` hedges with today's yfinance chain; the hedged
+    # backtest (milestone 9) needs Cboe history.
+    hedge_method: str = "delta"
     hedge_underlying: str = "SPY"
     hedge_root: str = "SPY"  # standard trading class only; roots ending in a digit are adjusted contracts
     standard_option_multiplier: int = 100  # OCC standard for the standard root; Cboe files carry no multiplier field
@@ -119,7 +120,9 @@ class Settings:
     hedge_delta_drift: float = 0.10  # extra hedge review when net beta-dollar delta moves this share of NAV
     hedge_dividend_yield: float = 0.013  # assumed SPY yield for Black-Scholes (assumption, not observed)
     hedge_stress_vol_bump: float = 0.15  # added to today's IV under hypothetical shocks (assumption)
-    volatility_index_ticker: str = "^VIX"  # observed stress volatility for historical replays
+    volatility_index_ticker: str = "^VIX"  # observed stress volatility for historical replays (points; / 100)
+    rate_ticker: str = "^IRX"  # 13-week T-bill yield in percent; the latest close is the option pricing rate
+    option_chain_max_days: int = 120  # fetch listed expiries up to this many calendar days ahead
     option_commission_per_contract: float = 0.65
     option_fees_per_contract: float = 0.05  # exchange and clearing
 

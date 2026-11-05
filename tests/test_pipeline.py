@@ -21,6 +21,9 @@ def offline_world(monkeypatch):
     membership, bars = make_universe()
     spy = bars.groupby("date", as_index=False)[["open", "high", "low", "close", "adj_close", "volume"]].mean()
     bars = pd.concat([bars, spy.assign(ticker="SPY", dividends=0.0, splits=0.0)], ignore_index=True)
+    index_rows = [spy.assign(ticker=name, open=level, high=level, low=level, close=level, adj_close=level, volume=0.0,
+                             dividends=0.0, splits=0.0) for name, level in (("^VIX", 20.0), ("^IRX", 4.0))]
+    bars = pd.concat([bars, *index_rows], ignore_index=True)
 
     def fake_batch(tickers, start, end):
         keep = bars["ticker"].isin(tickers) & (bars["date"] >= start) & (bars["date"] < end)  # yfinance end is exclusive
@@ -32,6 +35,16 @@ def offline_world(monkeypatch):
                         lambda url, now: (membership, {"source": "test", "retrieved_at": now.isoformat(),
                                                        "limitation": "synthetic"}))
     monkeypatch.setattr(data, "download_batch", fake_batch)
+
+    def fake_chain(underlying, max_days, today):
+        close = float(spy["close"].iloc[-1])
+        strikes = [round(close * m) for m in (0.85, 0.90, 0.95, 1.00)]
+        rows = [{"contractSymbol": f"SPY{e:%y%m%d}P{k * 1000:08d}", "strike": k, "bid": 0.9 * bid, "ask": 1.1 * bid,
+                 "impliedVolatility": 0.2, "lastTradeDate": None, "openInterest": 10, "contractSize": "REGULAR"}
+                for e in pd.to_datetime(["2025-08-15", "2025-09-19"]) for k, bid in zip(strikes, [0.2, 0.5, 1.0, 2.0])]
+        return pd.DataFrame(rows)
+
+    monkeypatch.setattr(data, "download_option_chain", fake_chain)
     return bars  # tests may edit these bars in place before a run
 
 
@@ -103,7 +116,7 @@ def test_build_funds_core_and_reconciles(tmp_path, offline_world):
     ledger = pd.read_csv(run_dir / "ledger.csv")
     assert holdings["market_value"].sum() == pytest.approx(nav["nav"])
     assert ledger["cash_flow"].sum() == pytest.approx(nav["cash"])
-    stocks = holdings.loc[holdings["ticker"] != "CASH"]
+    stocks = holdings.loc[~holdings["sector"].isin(["Cash", "Hedge (SPY puts)"])]
     assert set(stocks["ticker"]) == set(pd.read_csv(run_dir / "core.csv")["provider_ticker"])
     assert nav["cash"] > 0  # the reserve stays in cash
     assert holdings["weight_of_nav"].sum() == pytest.approx(1.0)
@@ -132,6 +145,42 @@ def test_build_funds_core_and_reconciles(tmp_path, offline_world):
     assert set(pd.read_csv(run_dir / "stress_download_failures.csv")["ticker"]) == {"XLB", "XLC", "XLE", "XLF",
                                                                                   "XLI", "XLK", "XLP", "XLRE",
                                                                                   "XLU", "XLV", "XLY"}
+
+
+def test_build_buys_the_hedge_through_the_ledger(tmp_path, offline_world):
+    s = make_settings(tmp_path, stress_loss_budget=0.1)  # below the synthetic book's worst loss
+    run_dir = main.run_select(s, offline=False, now=NOW, fund=True)
+    summary = pd.read_csv(run_dir / "hedge_summary.csv").set_index("metric")["value"]
+    meta = json.loads((run_dir / "metadata.json").read_text())
+    assert summary["contract"].startswith("SPY 2025-08-15 P")  # first expiry past the next review + 14 days
+    assert "yfinance" in meta["hedge"]["quote_source"] and "stocks only" in meta["hedge"]["label"]
+    filled = int(summary["contracts_filled"])
+    assert filled > 0, "the synthetic book breaches the stress budget, so the planner must buy puts"
+    nav = pd.read_csv(run_dir / "nav.csv").iloc[-1]
+    ledger = pd.read_csv(run_dir / "ledger.csv")
+    holdings = pd.read_csv(run_dir / "holdings.csv")
+    assert nav["derivative_value"] > 0 and ledger["cash_flow"].sum() == pytest.approx(nav["cash"])
+    put = holdings.loc[holdings["ticker"] == summary["contract"]].iloc[0]
+    assert put["quantity"] == filled and put["sector"] == "Hedge (SPY puts)"
+    assert put["market_value"] == pytest.approx(filled * 100 * float(summary["mid"]))
+    assert holdings["market_value"].sum() == pytest.approx(nav["nav"])
+    assert pd.read_csv(run_dir / "hedge_positions.csv").at[0, "contracts"] == filled
+    fills = pd.read_csv(run_dir / "hedge_fills.csv")
+    stock_costs = pd.read_csv(run_dir / "orders.csv")["total_cost"].sum()
+    assert meta["portfolio"]["total_trading_cost"] == pytest.approx(stock_costs + fills["total_cost"].sum(), abs=0.01)
+    assert meta["portfolio"]["valuation_date"] == "2025-07-01"
+    table = pd.read_csv(run_dir / "hedge_stress.csv")
+    assert (table["hedged_loss"] <= table["unhedged_loss"] + 0.01).all()
+    # risk, stress and optimization stay stock-only: no option ID leaks into them
+    assert summary["contract"] not in set(pd.read_csv(run_dir / "risk_positions.csv")["ticker"])
+
+
+def test_build_finishes_unhedged_without_usable_quotes(tmp_path, offline_world, monkeypatch):
+    monkeypatch.setattr(data, "download_option_chain", lambda *a: pd.DataFrame())
+    run_dir = main.run_select(make_settings(tmp_path), offline=False, now=NOW, fund=True)
+    summary = pd.read_csv(run_dir / "hedge_summary.csv").set_index("metric")["value"]
+    assert summary["status"].startswith("not hedged")
+    assert not pd.read_csv(run_dir / "holdings.csv")["sector"].eq("Hedge (SPY puts)").any()
 
 
 def test_build_cannot_see_the_fill_day(tmp_path, offline_world):
@@ -164,6 +213,7 @@ def test_dashboard_renders_build_run(tmp_path, offline_world, monkeypatch):
     at = AppTest.from_file(APP, default_timeout=60).run()
     assert not at.exception
     assert at.metric[0].label == "NAV"
+    assert any(m.label == "Puts held" for m in at.metric)
 
 
 def test_dashboard_renders_saved_run(tmp_path, offline_world, monkeypatch):
@@ -191,6 +241,7 @@ def test_backtest_command_writes_labelled_run(tmp_path, offline_world):
         assert (run_dir / f"{name}.csv").exists(), name
     meta = json.loads((run_dir / "metadata.json").read_text())
     assert meta["workflow"] == "backtest" and "survivorship-biased" in meta["label"]
+    assert meta["hedged_strategy"].startswith("not implemented")  # never silently passed off as the hedged strategy
     assert meta["reviews"] == 4  # month-ends 03-31 to 06-30 (06-30's next session, 07-01, starts a new month)
     assert "each completed month" in meta["policy"]["schedule"]
     assert not (run_dir / "core.csv").exists()  # backtest runs stay out of the build/select run list

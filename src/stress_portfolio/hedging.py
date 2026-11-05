@@ -13,6 +13,7 @@ import math
 import numpy as np
 import pandas as pd
 
+from . import stress
 from .config import Settings
 
 _erf = np.vectorize(math.erf, otypes=[float])
@@ -124,13 +125,13 @@ def size_hedge(scenarios: pd.DataFrame, entry_price: float, spot: float, strike:
 
 
 def scenario_inputs(capped_historical: pd.DataFrame, scenarios: pd.DataFrame, iv_now: float,
-                    s: Settings) -> pd.DataFrame:
+                    s: Settings, groups: tuple[str, ...] = ("train",)) -> pd.DataFrame:
     """Training scenarios in the shape hedged_losses needs. Historical rows come from stress.capped_replay
     (observed volatility index, path cut at the put's expiry); hypothetical rows from the stress table are
     instantaneous, with today's IV plus hedge_stress_vol_bump (an assumption)."""
-    usable = (capped_historical["group"] == "train") & capped_historical["available"].astype(bool)
+    usable = capped_historical["group"].isin(groups) & capped_historical["available"].astype(bool)
     hist = capped_historical.loc[usable, ["scenario", "book_pnl_usd", "spy_return", "stress_vol", "elapsed_years"]]
-    hypo = scenarios.loc[(scenarios["kind"] == "hypothetical") & (scenarios["group"] == "train")]
+    hypo = scenarios.loc[(scenarios["kind"] == "hypothetical") & scenarios["group"].isin(groups)]
     hypo = pd.DataFrame({"scenario": hypo["scenario"], "book_pnl_usd": hypo["pnl_usd"],
                          "spy_return": hypo["benchmark_return"], "stress_vol": iv_now + s.hedge_stress_vol_bump,
                          "elapsed_years": 0.0})
@@ -147,3 +148,72 @@ def beta_dollar_delta(stock_values: pd.Series, betas: pd.Series, contracts: floa
 def needs_review(net_delta: float, delta_at_hedge: float, nav: float, s: Settings) -> bool:
     """Extra hedge review once net beta-dollar delta drifts more than hedge_delta_drift x NAV from the last hedge."""
     return abs(net_delta - delta_at_hedge) > s.hedge_delta_drift * nav
+
+
+def next_review(date, s: Settings) -> pd.Timestamp:
+    """End of the next scheduled review period after `date` (calendar month or quarter end)."""
+    offset = {"M": pd.offsets.MonthEnd(1), "Q": pd.offsets.QuarterEnd(1)}[s.rebalance_frequency]
+    return pd.Timestamp(date) + offset
+
+
+def plan_hedge(stocks: pd.DataFrame, betas: pd.Series, nav: float, history: pd.DataFrame, chain: pd.DataFrame,
+               stress_scenarios: pd.DataFrame, valuation_date, s: Settings) -> dict:
+    """Which put to buy for today's book and how many, from data available at the valuation close.
+
+    stocks: index ticker, columns sector and market_value. history: wide closes since stress_history_start with the
+    hedge underlying, the volatility index (points) and the rate ticker (percent). chain: normalized put quotes.
+    Returns status plus, when a put is chosen, its quote, sizing, Greeks and a per-scenario table (all groups).
+    """
+    d = pd.Timestamp(valuation_date)
+    spy = history.get(s.hedge_underlying, pd.Series(dtype=float)).loc[:d].dropna()
+    vix = history.get(s.volatility_index_ticker, pd.Series(dtype=float)).loc[:d].dropna() / 100
+    rates = history.get(s.rate_ticker, pd.Series(dtype=float)).loc[:d].dropna() / 100
+    missing = [n for n, x in [(s.hedge_underlying, spy), (s.volatility_index_ticker, vix), (s.rate_ticker, rates)]
+               if x.empty]
+    if missing:
+        return {"status": f"not hedged: no {', '.join(missing)} history"}
+    if chain.empty:
+        return {"status": "not hedged: no option quotes"}
+    spot, rate = float(spy.iloc[-1]), float(rates.iloc[-1])
+    review = next_review(d, s)
+    pick = choose_put(chain, spot, review, s)
+    if pick is None:
+        return {"status": "not hedged: no listed put with a usable quote far enough out", "spot": spot,
+                "next_review": review}
+    observed = pd.notna(pick.get("iv")) and 0.03 <= pick["iv"] <= 3
+    iv_now = float(pick["iv"]) if observed else float(vix.iloc[-1])
+    iv_source = pick["iv_source"] if observed else f"{s.volatility_index_ticker} (quote had no usable IV)"
+    days = (pd.Timestamp(pick["expiration"]) - d).days
+    years, mult, entry = days / 365.0, int(pick["multiplier"]), float(pick["ask"])
+
+    capped = stress.capped_replay(stocks, history, betas, vix, days, s)
+    train = scenario_inputs(capped, stress_scenarios, iv_now, s)
+    size = size_hedge(train, entry, spot, float(pick["strike"]), years, mult, nav, rate, iv_now, s)
+    every = scenario_inputs(capped, stress_scenarios, iv_now, s, groups=("train", "validation"))
+    table = pd.DataFrame({
+        "group": stress_scenarios.set_index("scenario")["group"].reindex(every.index),
+        "spy_return": every["spy_return"], "stress_vol": every["stress_vol"], "elapsed_years": every["elapsed_years"],
+        "unhedged_loss": hedged_losses(every, 0, entry, spot, float(pick["strike"]), years, mult, nav, rate, s),
+        "hedged_loss": hedged_losses(every, size["contracts"], entry, spot, float(pick["strike"]), years, mult, nav,
+                                     rate, s)}).rename_axis("scenario").reset_index()
+    greeks = {k: float(v) for k, v in put_price_greeks(spot, float(pick["strike"]), years, rate, s.hedge_dividend_yield,
+                                                       iv_now).items()}
+    delta_before = beta_dollar_delta(stocks["market_value"], betas, 0, 0.0, spot, mult)
+    delta_after = beta_dollar_delta(stocks["market_value"], betas, size["contracts"], greeks["delta"], spot, mult)
+    return {"status": size["status"], "pick": pick, "sizing": size, "spot": spot, "rate": rate, "iv": iv_now,
+            "iv_source": iv_source, "years": years, "next_review": review, "greeks": greeks, "scenarios": table,
+            "capped": capped, "delta_before": delta_before, "delta_after": delta_after,
+            "_train": train, "_every": every, "_stocks": stocks, "_betas": betas}
+
+
+def resize_plan(plan: dict, contracts: int, nav: float, s: Settings) -> dict:
+    """The same plan with the contracts actually filled (e.g. after cash cut the order), so reports show the real hedge."""
+    pick, years, spot, rate = plan["pick"], plan["years"], plan["spot"], plan["rate"]
+    args = (float(pick["ask"]), spot, float(pick["strike"]), years, int(pick["multiplier"]), nav, rate, s)
+    table = plan["scenarios"].assign(hedged_loss=hedged_losses(plan["_every"], contracts, *args).to_numpy())
+    cost = annual_net_cost(float(pick["ask"]), spot, float(pick["strike"]), years, rate, plan["iv"], s) * int(pick["multiplier"])
+    sizing = plan["sizing"] | {"contracts": contracts, "annual_net_cost_usd": contracts * cost,
+                               "worst_hedged": float(hedged_losses(plan["_train"], contracts, *args).max())}
+    after = beta_dollar_delta(plan["_stocks"]["market_value"], plan["_betas"], contracts, plan["greeks"]["delta"], spot,
+                              int(pick["multiplier"]))
+    return plan | {"sizing": sizing, "scenarios": table, "delta_after": after}

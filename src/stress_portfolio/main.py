@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from . import backtest, data, optimization, risk, selection, stress
+from . import backtest, data, execution, hedging, optimization, risk, selection, stress
 from .config import ROOT, Settings
 
 
@@ -56,12 +56,99 @@ def run_stress_tests(s: Settings, book: dict, risk_tables: dict, shortlist: pd.D
     return tables, wide
 
 
+def run_hedge(s: Settings, book: dict, risk_tables: dict, stress_tables: dict, history: pd.DataFrame,
+              offline: bool, now: datetime) -> dict:
+    """Buy the stress-budget SPY put hedge for the funded book from today's yfinance chain, through the same ledger.
+
+    Runs after risk, stress and optimization, which describe the stock book only. The fill is the chain snapshot
+    taken now, after the valuation close: buys at the ask, puts then valued at the bid-ask mid.
+    """
+    chain, quality = data.fetch_option_chain(s, s.data_dir / "raw" / "options", offline, now)
+    stocks = book["holdings"].query("ticker != 'CASH'").set_index("ticker")[["sector", "market_value"]]
+    betas = risk_tables["risk_positions"].set_index("ticker")["beta"].reindex(stocks.index)
+    nav = float(book["nav"].iloc[-1]["nav"])
+    valuation = pd.Timestamp(book["nav"].iloc[-1]["date"])
+    if len(chain) and pd.Timestamp(chain["quote_date"].iloc[0]) < valuation:
+        plan = {"status": "not hedged: cached option quotes are older than the valuation date"}
+    else:
+        plan = hedging.plan_hedge(stocks, betas, nav, history, chain, stress_tables["stress_scenarios"], valuation, s)
+    out = {"hedge_chain": chain, "hedge_chain_quality": quality}
+    summary = {"status": plan["status"], "method": s.hedge_method, "quote_source": "yfinance (delayed, unofficial)",
+               "quotes_fetched_at": chain["fetched_at"].iloc[0] if len(chain) else None,
+               "valuation_date": str(valuation.date())}
+    if "pick" not in plan:
+        out["hedge_summary"] = pd.DataFrame(summary.items(), columns=["metric", "value"])
+        return out
+
+    pick, size, p = plan["pick"], plan["sizing"], book["portfolio"]
+    fill_date = pd.Timestamp(pick["quote_date"])
+    fills = pd.DataFrame(columns=execution.OPTION_FILL_COLUMNS)
+    if size["contracts"] > 0:
+        quotes = chain.set_index("contract")[["bid", "ask", "multiplier"]]
+        orders = pd.DataFrame({"contract": [pick["contract"]], "order_qty": [size["contracts"]]})
+        fills = execution.execute_options(orders, quotes, p.cash, s)
+        p.add_contract(pick["contract"], {"underlying": s.hedge_underlying, "option_type": "P",
+                                          "strike": float(pick["strike"]), "expiration": str(pick["expiration"].date()),
+                                          "multiplier": int(pick["multiplier"]), "exercise": "American",
+                                          "settlement": "physical (shares)"})
+        p.apply_option_fills(fills, fill_date)
+    mid = (pick["bid"] + pick["ask"]) / 2
+    held = p.options.get(pick["contract"], 0.0)
+    holdings, row = p.snapshot(fill_date, book["marks"], pd.Series({pick["contract"]: mid}) if held else None)
+    info = book["holdings"].set_index("ticker")
+    holdings = holdings.assign(company=holdings["ticker"].map(info["company"]).fillna(f"{s.hedge_underlying} put"),
+                               sector=holdings["ticker"].map(info["sector"]).fillna("Hedge (SPY puts)"),
+                               target_weight_of_nav=holdings["ticker"].map(info["target_weight_of_nav"]))
+    cash = pd.DataFrame([{"ticker": "CASH", "quantity": p.cash, "price": 1.0, "market_value": p.cash,
+                          "weight_of_nav": p.cash / row["nav"], "company": "Cash", "sector": "Cash",
+                          "target_weight_of_nav": s.cash_reserve}])
+    book["holdings"] = pd.concat([holdings, cash], ignore_index=True)
+    book["nav"] = pd.concat([book["nav"], pd.DataFrame([row | {"holdings": len(p.positions)}])], ignore_index=True)
+    book["ledger"] = p.ledger()
+
+    filled = int(fills["filled_qty"].sum()) if len(fills) else 0
+    g = plan["greeks"]
+    sized = size["contracts"]
+    if filled != sized:  # cash cut the order: report the hedge actually held, not the one sized
+        plan = hedging.resize_plan(plan, filled, nav, s)
+        size = plan["sizing"]
+    summary |= {
+        "contract": pick["contract"], "strike": float(pick["strike"]), "expiration": str(pick["expiration"].date()),
+        "next_review": str(plan["next_review"].date()), "days_to_expiry": round(plan["years"] * 365),
+        "spot": plan["spot"], "bid": float(pick["bid"]), "ask": float(pick["ask"]), "mid": float(mid),
+        "iv": plan["iv"], "iv_source": plan["iv_source"], "rate": plan["rate"],
+        "contracts_sized": sized, "contracts_filled": filled,
+        "premium_paid_usd": float((fills["filled_qty"] * fills["multiplier"] * fills["fill_price"]).sum()) if filled else 0.0,
+        "fees_usd": float(fills["commission"].sum()) if filled else 0.0,
+        "spread_cost_usd": float(fills["spread_cost"].sum()) if filled else 0.0,
+        "budget_cap_contracts": size["budget_cap_contracts"], "annual_net_cost_usd": size["annual_net_cost_usd"],
+        "worst_train_loss_unhedged": size["worst_unhedged"], "worst_train_loss_hedged": size["worst_hedged"],
+        "stress_loss_budget": s.stress_loss_budget, "premium_budget_share_nav": s.hedge_premium_budget,
+        "put_delta": g["delta"], "put_gamma": g["gamma"], "put_vega": g["vega"], "put_theta": g["theta"],
+        "beta_dollar_delta_before": plan["delta_before"], "beta_dollar_delta_after": plan["delta_after"],
+    }
+    if filled < summary["contracts_sized"]:
+        summary["status"] += f"; only {filled} of {summary['contracts_sized']} filled ({fills['reason'].iloc[0]})"
+    out |= {"hedge_summary": pd.DataFrame(summary.items(), columns=["metric", "value"]),
+            "hedge_positions": pd.DataFrame([{
+                "contract": pick["contract"], "underlying": s.hedge_underlying, "option_type": "P",
+                "strike": float(pick["strike"]), "expiration": str(pick["expiration"].date()),
+                "multiplier": int(pick["multiplier"]), "exercise": "American", "settlement": "physical (shares)",
+                "contracts": filled, "bid": float(pick["bid"]), "ask": float(pick["ask"]), "mid": float(mid),
+                "market_value": filled * int(pick["multiplier"]) * float(mid), "iv": plan["iv"],
+                "iv_source": plan["iv_source"], "delta": g["delta"], "gamma": g["gamma"], "vega": g["vega"],
+                "theta": g["theta"], "dollar_delta": filled * int(pick["multiplier"]) * g["delta"] * plan["spot"]}]),
+            "hedge_fills": fills, "hedge_stress": plan["scenarios"], "hedge_capped_events": plan["capped"]}
+    return out
+
+
 def load_long_history(s: Settings, tickers, end: str, offline: bool, now: datetime) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Wide adj_close since stress_history_start for `tickers`, the benchmark and the sector ETFs, in its own
     cache. Missing stocks are returned as failures (stress replays fall back to proxies for them)."""
     cache = s.data_dir / "raw" / "stress"
     folder = f"{s.stress_history_start}_{end}"
-    tickers = sorted({*tickers, s.benchmark_ticker, *dict(s.sector_etfs).values()})
+    tickers = sorted({*tickers, s.benchmark_ticker, *dict(s.sector_etfs).values(), s.volatility_index_ticker,
+                      s.rate_ticker})
     if offline:
         tickers = [t for t in tickers if (cache / folder / f"{t}.csv").exists()]
     history, failed = data.download_prices(tickers, s.stress_history_start, end, cache, s.download_chunk_size)
@@ -156,11 +243,12 @@ def run_select(s: Settings, offline: bool, now: datetime | None = None, fund: bo
     picked = bars if decision_date is None else bars.loc[bars["date"] <= decision_date]
     result = selection.run_selection(membership, picked, failures, s)
     book = backtest.fund_and_hold(result["core"], bars, decision_date, s) if fund else None
-    risk_tables, stress_tables, opt_tables = {}, {}, {}
+    risk_tables, stress_tables, opt_tables, hedge_tables = {}, {}, {}, {}
     if fund:
         risk_tables, bench_adj = run_risk(s, book, bars, price_cache, start, end, offline, now)
         stress_tables, history = run_stress_tests(s, book, risk_tables, result["shortlist"], end, offline, now)
         opt_tables = run_optimization(s, result, picked, bars, book, risk_tables, history, bench_adj)
+        hedge_tables = run_hedge(s, book, risk_tables, stress_tables, history, offline, now)
 
     run_dir = new_run_dir(s.runs_dir, now)
     for name in ["eligibility", "sector_quotas", "shortlist", "core", "reserves"]:
@@ -171,7 +259,7 @@ def run_select(s: Settings, offline: bool, now: datetime | None = None, fund: bo
     if book:
         for name in ["orders", "holdings", "ledger", "nav", "cost_scenarios"]:
             book[name].to_csv(run_dir / f"{name}.csv", index=False)
-    for name, table in {**risk_tables, **stress_tables, **opt_tables}.items():
+    for name, table in {**risk_tables, **stress_tables, **opt_tables, **hedge_tables}.items():
         table.to_csv(run_dir / f"{name}.csv", index=False)
     (run_dir / "settings.json").write_text(json.dumps(s.to_dict(), indent=2))
     meta = {
@@ -196,14 +284,16 @@ def run_select(s: Settings, offline: bool, now: datetime | None = None, fund: bo
     }
     if book:
         last = book["nav"].iloc[-1]
+        fills = hedge_tables.get("hedge_fills")
+        hedge_cost = float(fills["total_cost"].sum()) if fills is not None and len(fills) else 0.0
         meta["portfolio"] = {
             "decision_date": str(book["decision_date"].date()),
             "fill_date": str(book["fill_date"].date()),
-            "valuation_date": str(last["date"].date()),
+            "valuation_date": str(book["valuation_date"].date()),  # the stocks' close; a put's quote can be later
             "initial_capital": s.initial_capital,
             "nav": round(float(last["nav"]), 2),
             "cash": round(float(last["cash"]), 2),
-            "total_trading_cost": round(float(book["orders"]["total_cost"].sum()), 2),
+            "total_trading_cost": round(float(book["orders"]["total_cost"].sum()) + hedge_cost, 2),
             "event_order": list(backtest.EVENT_ORDER),
             "conventions": [
                 "Selection uses data up to the decision date; orders fill at the next session's open.",
@@ -247,9 +337,19 @@ def run_select(s: Settings, offline: bool, now: datetime | None = None, fund: bo
             "candidates": int(len(cand)),
             "infeasible": cand.loc[cand["expected_return"].isna(), "candidate"].tolist(),
         }
+        meta["hedge"] = {
+            **dict(hedge_tables["hedge_summary"].values),
+            "label": "Observed delayed yfinance quotes for today's book; not a backtest. Risk tables cover stocks only.",
+            "conventions": [
+                "Sized on the valuation close; filled at the chain snapshot taken at run time (buy at the ask).",
+                "Puts valued at the bid-ask mid; premium is cash exchanged for an asset, not a cost.",
+                "Stress: puts fully repriced with Black-Scholes (European; SPY puts are American, so model values run low).",
+                "Historical events are cut at the put's expiry, stock loss included; hypothetical shocks are instantaneous.",
+            ],
+        }
     else:
         meta["notes"].append("Target weights only; run `stress-portfolio build` for holdings, cash and NAV.")
-    (run_dir / "metadata.json").write_text(json.dumps(meta, indent=2))
+    (run_dir / "metadata.json").write_text(json.dumps(meta, indent=2, default=str))
     return run_dir
 
 
@@ -293,7 +393,8 @@ def run_backtest_cmd(s: Settings, offline: bool, now: datetime | None = None) ->
         "universe": "starting 100-stock shortlist fixed for the whole backtest, re-scored at each review",
         "membership": member_meta, "event_order": list(backtest.EVENT_ORDER),
         "long_history_failures": hist_failed["ticker"].tolist(),
-        "notes": ["Hedge reviews are not applicable until the hedge method is chosen (milestone 7).",
+        "hedged_strategy": backtest.HEDGED_STRATEGY_STATUS,
+        "notes": ["All strategies here are equity-only; hedge reviews start with the hedged strategy (milestone 9).",
                   "Commissions are charged on real shares (split-adjusted shares divided by later splits).",
                   "Gross CAGR adds total costs back to the final NAV and ignores their compounding."],
     }

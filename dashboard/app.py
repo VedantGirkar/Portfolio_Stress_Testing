@@ -14,8 +14,6 @@ from dashboard import charts  # noqa: E402
 from stress_portfolio.config import Settings  # noqa: E402
 
 RUNS_DIR = Path(os.environ.get("STRESS_PORTFOLIO_RUNS_DIR", Settings().runs_dir))
-HEDGING_PENDING = ("milestone 8. Method chosen: delta hedge with long SPY puts (worst stress ≤ 35% of NAV, "
-                   "premium ≤ 3% of NAV a year). Waiting on historical SPY option data from Cboe DataShop")
 TABLE_COLS = ["ticker", "company", "sector", "investment_score", "momentum", "downside_dev_annual",
               "max_drawdown", "median_dollar_volume", "reason"]
 
@@ -49,7 +47,7 @@ def load_run(path: str) -> dict:
     for n in ["holdings", "orders", "nav", "cost_scenarios", "risk_var", "risk_summary", "risk_positions",
               "risk_sectors", "risk_correlation", "risk_series", "var_backtest", "var_backtest_summary",
               "stress_scenarios", "stress_positions", "stress_sectors", "opt_candidates", "opt_weights",
-              "opt_frontier", "opt_estimates"]:
+              "opt_frontier", "opt_estimates", "hedge_summary", "hedge_stress", "hedge_fills", "hedge_capped_events"]:
         # only in `build` runs; risk tables only in builds made after milestone 3
         if (p / f"{n}.csv").exists():
             tables[n] = pd.read_csv(p / f"{n}.csv")
@@ -100,9 +98,10 @@ with tabs[0]:
         c = st.columns(5)
         c[0].metric("NAV", money(book['nav']), f"{book['nav'] / book['initial_capital'] - 1:+.2%}")
         c[1].metric("Cash", money(book['cash']), f"{book['cash'] / book['nav']:.1%} of NAV", delta_color="off")
-        c[2].metric("Holdings", int((h["ticker"] != "CASH").sum()))
+        c[2].metric("Holdings", int((~h["sector"].isin(["Cash", "Hedge (SPY puts)"])).sum()), help="Stocks only")
         c[3].metric("Trading costs", money(book['total_trading_cost']))
-        c[4].metric("Hedge", "TBD", help="Delta or gamma method is chosen at milestone 7")
+        puts = pd.to_numeric(h.loc[h["sector"] == "Hedge (SPY puts)", "quantity"]).sum()
+        c[4].metric("Hedge", f"{puts:.0f} SPY puts" if puts else "None", help="See the Hedging tab")
         left, right = st.columns(2)
         left.plotly_chart(charts.holdings_pie(h, "ticker", "Actual weights by holding (% of NAV)"),
                           width="stretch")
@@ -138,7 +137,7 @@ with tabs[0]:
         c[0].metric("Core holdings", len(core))
         c[1].metric("Reserves", len(reserves))
         c[2].metric("Core sectors", core["sector"].nunique())
-        c[3].metric("Hedge", "TBD", help="Delta or gamma method is chosen at milestone 7")
+        c[3].metric("Hedge", "None", help="Selection-only run; `stress-portfolio build` buys the hedge")
         left, right = st.columns(2)
         left.plotly_chart(charts.core_weight_pie(core), width="stretch")
         right.plotly_chart(charts.core_sector_pie(core), width="stretch")
@@ -182,6 +181,8 @@ with tabs[2]:
         rm, var, summ = meta["risk"], r["risk_var"], r["risk_summary"].set_index("metric")["value"]
         hist = var.loc[var["method"] == "historical"].set_index(["horizon_days", "confidence"])
         nav_now = meta["portfolio"]["nav"]
+        if "hedge_summary" in r:
+            st.caption("These risk figures cover the stocks only; the hedge is not included. See the Hedging tab.")
         st.caption(f"Historical simulation: today's holdings repriced with each day's returns from {rm['window'][0]} "
                    f"to {rm['window'][1]}. These are hypothetical P&Ls of today's book, not past results. "
                    "Losses are positive. VaR is a loss level exceeded on about 1% (or 5%) of past days, "
@@ -244,6 +245,8 @@ with tabs[3]:
     else:
         sc, pos = r["stress_scenarios"], r["stress_positions"]
         done = sc.dropna(subset=["pnl_usd"])
+        if "hedge_stress" in r:
+            st.caption("These losses are for the stocks only. The Hedging tab shows them with the puts.")
         st.caption("Today's holdings hit with each scenario's moves; cash is unchanged. A historical replay asks "
                    "'what would today's book have lost in that event?'. It is not a record of trades anyone made. "
                    "Historical windows are SPY's deepest peak-to-trough fall inside each event.")
@@ -364,8 +367,8 @@ with tabs[5]:
                      column_config={"date": st.column_config.DateColumn(),
                                     "improvement": st.column_config.NumberColumn("after-cost gain", format="percent"),
                                     "cost_usd": st.column_config.NumberColumn("est. cost", format="dollar")})
-        st.caption("Hedge reviews are logged separately from stock decisions; they start once the hedge method is "
-                   "chosen (milestone 7).")
+        st.caption("These strategies are stocks only. Hedge reviews are logged separately and start with the "
+                   "hedged strategy (milestone 9).")
 
         if log["improvement"].notna().any():
             st.plotly_chart(charts.rebalance_gains(log, bt["settings"]["rebalance_min_improvement"]), width="stretch",
@@ -398,7 +401,63 @@ with tabs[5]:
                 st.dataframe(bt["bt_dropped"], hide_index=True, alt="Stocks without a full price window at a review")
 
 with tabs[6]:
-    st.info(f"No hedge in saved runs yet; hedge results arrive with {HEDGING_PENDING}.", icon=":material/construction:")
+    if "hedge_summary" not in r:
+        st.info("No hedge in this run. Create a new run with `uv run stress-portfolio build`.",
+                icon=":material/construction:")
+    else:
+        hm = dict(zip(r["hedge_summary"]["metric"], r["hedge_summary"]["value"]))
+        if "contract" not in hm:
+            st.warning(hm["status"], title="This run has no hedge", icon=":material/warning:")
+        else:
+            num = lambda k: float(hm[k])  # noqa: E731  the summary table stores every value as text
+            met = "partial" not in hm["status"] and "only" not in hm["status"] and "not hedged" not in hm["status"]
+            st.caption(f"{meta['hedge']['label']} Quotes fetched {hm['quotes_fetched_at']}, from {hm['quote_source']}.")
+            if not met:
+                st.warning(f"{hm['status']}. The worst training loss stays above the {num('stress_loss_budget'):.0%} "
+                           "budget.", title="Partial hedge", icon=":material/warning:")
+            c = st.columns(4)
+            quiet = {"delta_color": "off", "delta_arrow": "off"}
+            c[0].metric("Puts held", int(num("contracts_filled")), f"{num('strike'):.0f} strike", **quiet,
+                        help="Whole SPY put contracts held; each covers 100 shares.")
+            c[1].metric("Worst loss", f"{num('worst_train_loss_hedged'):.1%}",
+                        f"{num('worst_train_loss_unhedged'):.1%} without puts", **quiet,
+                        help="Worst training scenario with the puts, historical events cut at the put's expiry.")
+            c[2].metric("Premium paid", money(num("premium_paid_usd")), f"{money(num('fees_usd') + num('spread_cost_usd'))} fees + half-spread", **quiet)
+            c[3].metric("Net cost a year", money(num("annual_net_cost_usd")),
+                        f"cap {num('premium_budget_share_nav'):.0%} of NAV", **quiet,
+                        help="Modeled: premium minus resale at the next review, with price and volatility unchanged.")
+            scen_labels = dict(zip(r["stress_scenarios"]["scenario"], r["stress_scenarios"]["label"]))
+            st.plotly_chart(charts.hedge_stress_bars(r["hedge_stress"], scen_labels, num("stress_loss_budget")),
+                            width="stretch", alt="Loss in each scenario with and without the SPY puts, against the budget")
+            st.caption("Puts are repriced with Black-Scholes at the end of each scenario. Historical events stop at the "
+                       "put's expiry, stock loss included, so slow bear markets count only their first weeks. "
+                       "Hypothetical shocks are instantaneous. SPY is not this book, so the hedge can miss.")
+            left, right = st.columns(2)
+            with left:
+                st.subheader("The put")
+                st.table(pd.DataFrame({"": [hm["contract"], hm["expiration"], hm["next_review"],
+                                            f"{num('bid'):.2f} / {num('ask'):.2f}", f"{num('iv'):.1%} ({hm['iv_source']})",
+                                            f"{num('rate'):.2%}", f"{num('spot'):.2f}"]},
+                                      index=["Contract", "Expiry", "Next review", "Bid / ask", "Implied volatility",
+                                             "Interest rate", "SPY price"]),
+                         hide_header=True, alt="Terms and quote of the put held")
+            with right:
+                st.subheader("Exposure")
+                st.table(pd.DataFrame({"": [money(num("beta_dollar_delta_before")), money(num("beta_dollar_delta_after")),
+                                            f"{num('put_delta'):.3f}", f"{num('put_gamma'):.4f}", f"{num('put_vega'):.2f}",
+                                            f"{num('put_theta'):.2f}"]},
+                                      index=["Beta-dollar delta, stocks", "Beta-dollar delta, with puts", "Put delta",
+                                             "Put gamma (per $1)", "Put vega (per 1.00 vol)", "Put theta (per year)"]),
+                         hide_header=True, alt="Beta-dollar delta before and after the puts, and the put's Greeks")
+                st.caption("Greeks are per share, from the model. The target is the stress loss, not delta neutrality, so "
+                           "a large delta remains on purpose.")
+            with st.expander("Scenario table"):
+                st.dataframe(r["hedge_stress"], hide_index=True, alt="Scenario inputs and losses with and without puts",
+                             column_config={c: st.column_config.NumberColumn(format="percent")
+                                            for c in ["spy_return", "stress_vol", "unhedged_loss", "hedged_loss"]})
+            if "hedge_capped_events" in r:
+                with st.expander("Historical events cut at expiry"):
+                    st.dataframe(r["hedge_capped_events"], hide_index=True, alt="Historical event windows cut at the put's expiry")
 
 with tabs[7]:
     if bt is None:
@@ -408,6 +467,8 @@ with tabs[7]:
         st.warning(f"Results are {bm['label']}. Today's winners are replayed into the past, so every strategy "
                    "here is flattered; compare strategies with each other, not with real-world returns.",
                    title="Preliminary backtest", icon=":material/warning:")
+        st.caption("All strategies here are unhedged benchmarks. The hedged strategy is "
+                   f"{bm.get('hedged_strategy', 'not in this run')}.")
         best = summ.loc[summ["strategy"].isin(bm["strategies"])].set_index("strategy")
         c = st.columns(len(best))
         for col, (name, row) in zip(c, best.iterrows()):

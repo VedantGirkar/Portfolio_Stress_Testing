@@ -140,3 +140,58 @@ def test_missing_stress_volatility_is_refused(tmp_path):
     bad = _scenarios().assign(stress_vol=[0.6, np.nan, 0.25])
     with pytest.raises(ValueError, match="stress volatility"):
         hedging.hedged_losses(bad, 1, s=s, **PUT)
+
+
+def _plan_world():
+    dates = pd.bdate_range("2020-01-01", "2020-06-30")
+    spy = pd.Series(np.interp(np.arange(len(dates)), [0, 23, 53, len(dates) - 1], [90, 100, 60, 80]), index=dates)
+    history = pd.DataFrame({"SPY": spy, "A": spy * 2, "^VIX": 30.0, "^IRX": 2.0})
+    stocks = pd.DataFrame({"sector": ["Energy"], "market_value": [900_000.0]}, index=["A"])
+    betas = pd.Series({"A": 1.0})
+    table = pd.DataFrame({"scenario": ["market-20%"], "kind": ["hypothetical"], "group": ["train"],
+                          "pnl_usd": [-180_000.0], "benchmark_return": [-0.2]})
+    chain = pd.DataFrame({"root": "SPY", "option_type": "P", "expiration": pd.Timestamp("2020-08-21"),
+                          "strike": [76.0, 80.0], "bid": [1.0, 2.0], "ask": [1.1, 2.1], "iv": [0.25, np.nan],
+                          "multiplier": 100, "contract": ["P76", "P80"], "iv_source": "test quotes"})
+    return stocks, betas, history, chain, table
+
+
+EVENT = (("crash", "Test crash", "2020-01-01", "2020-06-30", "train"),)
+
+
+def test_plan_hedge_picks_sizes_and_labels(tmp_path):
+    s = make_settings(tmp_path, stress_events=EVENT, stress_loss_budget=0.2, hedge_premium_budget=1.0)
+    stocks, betas, history, chain, table = _plan_world()
+    plan = hedging.plan_hedge(stocks, betas, 1_000_000.0, history, chain, table, "2020-06-30", s)
+    assert plan["pick"]["strike"] == 76.0 and plan["iv"] == 0.25 and plan["iv_source"] == "test quotes"
+    assert plan["rate"] == pytest.approx(0.02) and plan["next_review"] == pd.Timestamp("2020-07-31")
+    assert plan["sizing"]["contracts"] > 0 and plan["delta_after"] < plan["delta_before"]
+    table = plan["scenarios"].set_index("scenario")
+    assert table.at["crash", "hedged_loss"] < table.at["crash", "unhedged_loss"]
+    assert table.at["crash", "stress_vol"] == pytest.approx(0.30)  # observed index, not assumed
+
+
+def test_plan_hedge_uses_the_index_when_the_quote_has_no_iv(tmp_path):
+    s = make_settings(tmp_path, stress_events=EVENT, hedge_moneyness=0.999)
+    stocks, betas, history, chain, table = _plan_world()
+    plan = hedging.plan_hedge(stocks, betas, 1_000_000.0, history, chain, table, "2020-06-30", s)
+    assert plan["pick"]["strike"] == 80.0 and plan["iv"] == pytest.approx(0.30) and "^VIX" in plan["iv_source"]
+
+
+def test_plan_hedge_reports_missing_inputs_without_crashing(tmp_path):
+    s = make_settings(tmp_path, stress_events=EVENT)
+    stocks, betas, history, chain, table = _plan_world()
+    args = (stocks, betas, 1_000_000.0)
+    assert "^VIX" in hedging.plan_hedge(*args, history.drop(columns="^VIX"), chain, table, "2020-06-30", s)["status"]
+    assert "no option quotes" in hedging.plan_hedge(*args, history, chain.iloc[0:0], table, "2020-06-30", s)["status"]
+    late = chain.assign(expiration=pd.Timestamp("2020-07-03"))  # before the next review + buffer
+    assert "no listed put" in hedging.plan_hedge(*args, history, late, table, "2020-06-30", s)["status"]
+
+
+def test_resize_plan_reports_the_contracts_actually_held(tmp_path):
+    s = make_settings(tmp_path, stress_events=EVENT, stress_loss_budget=0.2, hedge_premium_budget=1.0)
+    stocks, betas, history, chain, table = _plan_world()
+    plan = hedging.plan_hedge(stocks, betas, 1_000_000.0, history, chain, table, "2020-06-30", s)
+    less = hedging.resize_plan(plan, 1, 1_000_000.0, s)
+    assert less["sizing"]["contracts"] == 1 and less["sizing"]["worst_hedged"] > plan["sizing"]["worst_hedged"]
+    assert less["delta_after"] > plan["delta_after"]

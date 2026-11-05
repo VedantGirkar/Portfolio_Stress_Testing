@@ -145,6 +145,23 @@ def stress_bars(scenarios: pd.DataFrame) -> go.Figure:
     return _tidy(fig, height=max(420, 26 * len(df)))
 
 
+def hedge_stress_bars(scenarios: pd.DataFrame, labels: dict, budget: float) -> go.Figure:
+    """Unhedged vs hedged loss per scenario, worst first, against the stress-loss budget."""
+    df = scenarios.sort_values("unhedged_loss")
+    names = df["scenario"].map(labels).fillna(df["scenario"])
+    fig = go.Figure()
+    # horizontal groups draw the last trace on top, so unhedged goes last and the legend is reversed to match
+    for col, name, color in [("hedged_loss", "With puts", "#2563eb"), ("unhedged_loss", "Unhedged", "#d97706")]:
+        fig.add_bar(y=names, x=df[col], name=name, orientation="h", marker_color=color,
+                    hovertemplate="%{y}<br>" + name + ": %{x:.1%} of NAV<extra></extra>")
+    fig.add_vline(x=budget, line_dash="dash", line_color="#ef4444", annotation_text=f"Budget {budget:.0%}",
+                  annotation_position="top")
+    fig.update_layout(title="Loss in each scenario, with and without the puts (% of NAV)", barmode="group",
+                      bargap=0.25, bargroupgap=0.08, xaxis_tickformat=".0%", yaxis_title="", xaxis_title="",
+                      legend_traceorder="reversed")
+    return _tidy(fig, height=max(420, 34 * len(df)))
+
+
 def stress_attribution(positions: pd.DataFrame, label: str) -> go.Figure:
     df = positions.sort_values("pnl_usd")
     fig = px.bar(df, x="pnl_usd", y="ticker", color="source", orientation="h", title=f"P&L by holding: {label}")
