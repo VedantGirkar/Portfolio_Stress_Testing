@@ -42,3 +42,27 @@ def test_unchanged_float_weights_do_not_trade():
     nav, price = 1_002_903.3, 343.83
     weight = 279 * price / nav  # the drifted weight read back from holdings
     assert execution.generate_orders({"A": 279.0}, pd.Series({"A": weight}), pd.Series({"A": price}), nav).empty
+
+
+def _quotes():
+    return pd.DataFrame({"bid": [2.0, 0.0, 1.0], "ask": [2.2, 0.1, 0.0], "multiplier": [100, 100, 100]},
+                        index=["P1", "P2", "P3"])
+
+
+def test_option_fills_reject_unusable_quotes_and_keep_zero_bid_sells(tmp_path):
+    s = make_settings(tmp_path)
+    orders = pd.DataFrame({"contract": ["P1", "P2", "P3", "MISSING"], "order_qty": [5, -3, 2, 1]})
+    fills = execution.execute_options(orders, _quotes(), cash=10_000, s=s).set_index("contract")
+    assert fills.loc["P1", "status"] == "filled" and fills.loc["P1", "fill_price"] == 2.2
+    assert fills.loc["P2", "status"] == "filled" and fills.loc["P2", "fill_price"] == 0.0  # worthless put sold
+    assert fills.loc["P3", "status"] == "rejected" and fills.loc["P3", "filled_qty"] == 0  # no offer to buy
+    assert fills.loc["MISSING", "status"] == "rejected"
+
+
+def test_option_buys_are_cut_to_available_cash(tmp_path):
+    s = make_settings(tmp_path)
+    orders = pd.DataFrame({"contract": ["P1"], "order_qty": [10]})
+    fills = execution.execute_options(orders, _quotes(), cash=1_000, s=s).iloc[0]
+    assert fills["filled_qty"] == 4 and fills["status"] == "adjusted"  # 4 x (220 + 0.70) <= 1000 < 5 x 220.70
+    broke = execution.execute_options(orders, _quotes(), cash=100, s=s).iloc[0]
+    assert broke["filled_qty"] == 0 and broke["reason"] == "insufficient cash"

@@ -178,3 +178,56 @@ def future_split_factor(bars: pd.DataFrame) -> pd.DataFrame:
 def wide(bars: pd.DataFrame, field: str) -> pd.DataFrame:
     """Date x ticker table on the common session calendar (union of all dates)."""
     return bars.pivot(index="date", columns="ticker", values=field).sort_index()
+
+
+# Cboe DataShop "Option EOD Summary" (layout v1.1), ordered with Calcs. Only these columns are used.
+_CBOE_FIELDS = {
+    "underlying_symbol": "underlying", "quote_date": "quote_date", "root": "root", "expiration": "expiration",
+    "strike": "strike", "option_type": "option_type", "bid_1545": "bid", "ask_1545": "ask",
+    "bid_size_1545": "bid_size", "ask_size_1545": "ask_size", "underlying_bid_1545": "underlying_bid",
+    "underlying_ask_1545": "underlying_ask", "active_underlying_price_1545": "model_underlying_price",
+    "implied_volatility_1545": "iv", "delta_1545": "delta", "gamma_1545": "gamma", "theta_1545": "theta",
+    "vega_1545": "vega", "bid_eod": "bid_eod", "ask_eod": "ask_eod", "open_interest": "open_interest",
+}
+
+
+def load_option_quotes(paths: list[Path], s) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Normalized hedge-underlying quotes from Cboe daily files (zipped CSV), plus a data-quality table.
+
+    Fill and mark prices are the 15:45 NBBO (bid/ask). Rules from the layout notes:
+    - Only the standard root (s.hedge_root) is kept; roots ending in a digit are adjusted contracts whose
+      deliverable the files do not give, so they are excluded and listed in the quality table.
+    - The files carry no multiplier field, so `multiplier` is the OCC standard for the standard root.
+    - Implied volatility 0 means Cboe could not compute one: it becomes missing, never zero volatility.
+    - Underlying bid/ask 0 means not available: missing. A zero option bid is a real quote and is kept.
+    - IV and Greeks are Cboe's (method not documented), labeled vendor values; our repricing uses hedging.py.
+    """
+    from .hedging import contract_id
+
+    frames, quality = [], []
+    for path in paths:
+        raw = pd.read_csv(path)
+        missing = set(_CBOE_FIELDS) - set(raw.columns)
+        if missing:
+            raise ValueError(f"{path}: missing columns {sorted(missing)} (order the file with Calcs)")
+        df = raw.loc[raw["underlying_symbol"] == s.hedge_underlying, list(_CBOE_FIELDS)].rename(columns=_CBOE_FIELDS)
+        other = df["root"] != s.hedge_root
+        for root, n in df.loc[other, "root"].value_counts().items():
+            quality.append({"file": Path(path).name, "root": root, "rows": int(n),
+                            "action": "excluded: non-standard root, deliverable unknown"})
+        frames.append(df.loc[~other])
+    cols = list(_CBOE_FIELDS.values()) + ["multiplier", "contract", "iv_source"]
+    if not frames:
+        return pd.DataFrame(columns=cols), pd.DataFrame(quality)
+    q = pd.concat(frames, ignore_index=True)
+    q["quote_date"], q["expiration"] = pd.to_datetime(q["quote_date"]), pd.to_datetime(q["expiration"])
+    q["option_type"] = q["option_type"].str.upper()
+    q["iv"] = q["iv"].where(q["iv"] > 0)
+    for c in ["underlying_bid", "underlying_ask", "model_underlying_price"]:
+        q[c] = q[c].where(q[c] > 0)
+    q["multiplier"] = s.standard_option_multiplier
+    q["contract"] = [contract_id(r, e, t, k) for r, e, t, k in
+                     zip(q["root"], q["expiration"], q["option_type"], q["strike"])]
+    q["iv_source"] = "Cboe 15:45 (vendor-observed)"
+    return q[cols].sort_values(["quote_date", "expiration", "strike", "option_type"]).reset_index(drop=True), \
+        pd.DataFrame(quality)

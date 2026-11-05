@@ -58,3 +58,64 @@ def test_missing_price_and_tampering_are_caught(tmp_path):
     p.cash += 1  # change cash outside the ledger
     with pytest.raises(AssertionError, match="cash"):
         p.reconcile()
+
+
+def _put(p, contract="SPY 2016-02-19 P 190.00", expiry="2016-02-19"):
+    p.add_contract(contract, {"underlying": "SPY", "option_type": "P", "strike": 190.0, "expiration": expiry,
+                              "multiplier": 100, "exercise": "American", "settlement": "physical"})
+    return contract
+
+
+def _option_fill(contract, qty, bid, ask, s):
+    from stress_portfolio import execution
+    quotes = pd.DataFrame({"bid": [bid], "ask": [ask], "multiplier": [100]}, index=[contract])
+    return execution.execute_options(pd.DataFrame({"contract": [contract], "order_qty": [qty]}), quotes, 1e9, s)
+
+
+def test_put_purchase_exchanges_cash_for_an_asset(tmp_path):
+    s = make_settings(tmp_path)
+    p = Portfolio()
+    p.deposit("d0", 100_000)
+    c = _put(p)
+    p.apply_option_fills(_option_fill(c, 10, 2.0, 2.2, s), "d1")
+    assert p.cash == pytest.approx(100_000 - 10 * 100 * 2.2 - 7.0)
+    assert p.positions == {} and p.options == {c: 10}  # never mixed with stock positions
+    holdings, row = p.snapshot("d1", pd.Series(dtype=float), pd.Series({c: 2.1}))  # marked at mid
+    assert row["derivative_value"] == pytest.approx(2_100) and row["equity_value"] == 0
+    assert 100_000 - row["nav"] == pytest.approx(10 * 100 * 0.1 + 7.0)  # half-spread + fees, no premium loss
+
+
+def test_option_marks_must_exist_and_short_options_are_refused(tmp_path):
+    s = make_settings(tmp_path)
+    p = Portfolio()
+    p.deposit("d0", 100_000)
+    c = _put(p)
+    p.apply_option_fills(_option_fill(c, 2, 2.0, 2.2, s), "d1")
+    assert p.snapshot("d1", pd.Series(dtype=float), pd.Series({c: 0.0}))[1]["derivative_value"] == 0  # worthless is valid
+    with pytest.raises(ValueError, match="no valid option mark"):
+        p.snapshot("d1", pd.Series(dtype=float))
+    with pytest.raises(ValueError, match="exceeds"):
+        p.apply_option_fills(_option_fill(c, -3, 2.0, 2.2, s), "d2")
+    with pytest.raises(KeyError):
+        p.apply_option_fills(_option_fill("UNKNOWN", 1, 2.0, 2.2, s), "d2")
+    with pytest.raises(ValueError, match="multiplier"):
+        p.add_contract("X", {"multiplier": None})
+
+
+def test_close_then_expiry_settlement_reconciles(tmp_path):
+    s = make_settings(tmp_path)
+    p = Portfolio()
+    p.deposit("d0", 100_000)
+    itm, otm = _put(p), _put(p, "SPY 2016-02-19 P 150.00")
+    p.contracts[otm]["strike"] = 150.0
+    p.apply_option_fills(_option_fill(itm, 3, 2.0, 2.2, s), "d1")
+    p.apply_option_fills(_option_fill(otm, 2, 0.1, 0.2, s), "d1")
+    p.apply_option_fills(_option_fill(itm, -1, 3.0, 3.2, s), "d2")  # partial close at the bid
+    cash = p.cash
+    p.expire_options("2016-02-18", underlying_price=180.0)  # not expired yet
+    assert p.options == {itm: 2, otm: 2}
+    p.expire_options("2016-02-19", underlying_price=180.0)
+    assert p.options == {} and p.cash == pytest.approx(cash + 2 * 100 * 10.0)  # ITM: net intrinsic; OTM: 0
+    types = p.ledger()["type"].tolist()
+    assert types.count("exercise") == 1 and types.count("expiry") == 1
+    p.reconcile()

@@ -398,7 +398,7 @@ with tabs[5]:
                 st.dataframe(bt["bt_dropped"], hide_index=True, alt="Stocks without a full price window at a review")
 
 with tabs[6]:
-    st.info(f"Hedging is not built yet — arrives in {HEDGING_PENDING}.", icon=":material/construction:")
+    st.info(f"No hedge in saved runs yet; hedge results arrive with {HEDGING_PENDING}.", icon=":material/construction:")
 
 with tabs[7]:
     if bt is None:

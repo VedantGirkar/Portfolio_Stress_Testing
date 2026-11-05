@@ -37,3 +37,22 @@ def test_commission_uses_real_shares_after_splits(tmp_path):
     c = costs.stock_costs(pd.Series([40_000]), pd.Series([1.0]), s, split_factor=pd.Series([40.0]))
     assert c.loc[0, "commission"] == pytest.approx(5.0)  # not 200
     assert c.loc[0, "spread_cost"] == pytest.approx(40_000 * 2e-4)  # value-based costs unchanged
+
+
+def test_option_costs_fill_at_quote_and_charge_fees_once(tmp_path):
+    s = make_settings(tmp_path)  # $0.65 commission + $0.05 fees per contract
+    c = costs.option_costs(pd.Series([10, -4, 0]), pd.Series([2.00, 0.0, 1.0]), pd.Series([2.20, 0.10, 1.2]),
+                           pd.Series([100, 100, 100]), s)
+    buy, sell, none = c.iloc[0], c.iloc[1], c.iloc[2]
+    assert buy["fill_price"] == pytest.approx(2.20) and buy["commission"] == pytest.approx(7.0)
+    assert buy["spread_cost"] == pytest.approx(10 * 100 * 0.10) and buy["slippage_cost"] == 0
+    assert sell["fill_price"] == 0.0 and sell["spread_cost"] == pytest.approx(4 * 100 * 0.05)  # zero bid kept
+    assert none["total_cost"] == 0
+
+
+def test_option_friction_scenarios_scale_around_the_mid(tmp_path):
+    s = make_settings(tmp_path)
+    args = (pd.Series([1]), pd.Series([2.0]), pd.Series([2.2]), pd.Series([100]), s)
+    low, high = costs.option_costs(*args, "low").iloc[0], costs.option_costs(*args, "high").iloc[0]
+    assert low["fill_price"] == pytest.approx(2.15) and high["fill_price"] == pytest.approx(2.30)
+    assert high["commission"] == pytest.approx(1.4)

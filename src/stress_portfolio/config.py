@@ -107,8 +107,21 @@ class Settings:
     rebalance_min_improvement: float = 0.005  # annual utility gain after costs needed to switch
     rebalance_drift_band: float = 0.02  # a limit only counts as broken once drift passes it by this much
 
-    # Hedge (decided at milestone 7; a full-strategy run must reject "undecided")
+    # Hedge (decided at milestone 7; a full-strategy run must reject "undecided"). Long SPY puts only, sized so the
+    # worst training stress scenario stays within stress_loss_budget; see PROJECT_SPECIFICATION.md 5.11.
     hedge_method: str = "undecided"
+    hedge_underlying: str = "SPY"
+    hedge_root: str = "SPY"  # standard trading class only; roots ending in a digit are adjusted contracts
+    standard_option_multiplier: int = 100  # OCC standard for the standard root; Cboe files carry no multiplier field
+    hedge_moneyness: float = 0.95  # strike as a fraction of the underlying price
+    hedge_expiry_buffer_days: int = 14  # expiry at least the next review plus this many calendar days
+    hedge_premium_budget: float = 0.03  # net premium (paid minus resale) per year, share of NAV
+    hedge_delta_drift: float = 0.10  # extra hedge review when net beta-dollar delta moves this share of NAV
+    hedge_dividend_yield: float = 0.013  # assumed SPY yield for Black-Scholes (assumption, not observed)
+    hedge_stress_vol_bump: float = 0.15  # added to today's IV under hypothetical shocks (assumption)
+    volatility_index_ticker: str = "^VIX"  # observed stress volatility for historical replays
+    option_commission_per_contract: float = 0.65
+    option_fees_per_contract: float = 0.05  # exchange and clearing
 
     def __post_init__(self) -> None:
         weights = self.weight_momentum + self.weight_low_downside + self.weight_low_drawdown
@@ -130,6 +143,8 @@ class Settings:
             raise ValueError(f"unknown cost_scenario {self.cost_scenario!r}")
         if self.hedge_method not in {"undecided", "delta", "gamma"}:
             raise ValueError(f"unknown hedge_method {self.hedge_method!r}")
+        if not 0 < self.hedge_moneyness <= 1.5 or self.hedge_premium_budget < 0:
+            raise ValueError("hedge_moneyness must be in (0, 1.5] and hedge_premium_budget non-negative")
 
     def to_dict(self) -> dict:
         return {k: str(v) if isinstance(v, Path) else v for k, v in asdict(self).items()}

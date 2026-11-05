@@ -112,3 +112,52 @@ def test_future_split_factor():
     bars = pd.DataFrame({"date": dates, "ticker": "N", "splits": [0, 4.0, 0, 10.0, 0]})
     f = data.future_split_factor(bars)["N"].tolist()
     assert f == [40.0, 10.0, 10.0, 1.0, 1.0]  # the split day itself already trades post-split
+
+
+CBOE_COLUMNS = ["underlying_symbol", "quote_date", "root", "expiration", "strike", "option_type", "open", "high", "low",
+                "close", "trade_volume", "bid_size_1545", "bid_1545", "ask_size_1545", "ask_1545",
+                "underlying_bid_1545", "underlying_ask_1545", "implied_underlying_price_1545",
+                "active_underlying_price_1545", "implied_volatility_1545", "delta_1545", "gamma_1545", "theta_1545",
+                "vega_1545", "rho_1545", "bid_size_eod", "bid_eod", "ask_size_eod", "ask_eod", "underlying_bid_eod",
+                "underlying_ask_eod", "vwap", "open_interest", "delivery_code"]
+
+
+def _cboe_file(path, rows, drop=()):
+    """A zipped CSV in the Cboe Option EOD Summary layout (v1.1, with Calcs)."""
+    base = dict.fromkeys(CBOE_COLUMNS, 0)
+    df = pd.DataFrame([base | r for r in rows]).drop(columns=list(drop))
+    df.to_csv(path, index=False, compression={"method": "zip", "archive_name": path.stem + ".csv"})
+    return path
+
+
+ROW = dict(underlying_symbol="SPY", quote_date="2016-01-04", root="SPY", expiration="2016-02-19", strike=190,
+           option_type="p", bid_1545=1.5, ask_1545=1.6, underlying_bid_1545=201.0, underlying_ask_1545=201.02,
+           active_underlying_price_1545=201.01, implied_volatility_1545=0.21, delta_1545=-0.3, open_interest=100)
+
+
+def test_option_loader_normalizes_and_excludes_adjusted_roots(tmp_path):
+    from .conftest import make_settings
+    s = make_settings(tmp_path)
+    path = _cboe_file(tmp_path / "UnderlyingOptionsEODCalcs_2016-01-04.zip", [
+        ROW,
+        ROW | {"strike": 150, "bid_1545": 0.0, "ask_1545": 0.05, "implied_volatility_1545": 0.0,
+               "underlying_bid_1545": 0.0},
+        ROW | {"root": "SPY7"},
+        ROW | {"underlying_symbol": "QQQ", "root": "QQQ"},
+    ])
+    quotes, quality = data.load_option_quotes([path], s)
+    assert list(quotes["strike"]) == [150, 190]  # QQQ filtered out, SPY7 excluded
+    assert quality.to_dict("records") == [{"file": path.name, "root": "SPY7", "rows": 1,
+                                           "action": "excluded: non-standard root, deliverable unknown"}]
+    cheap, normal = quotes.iloc[0], quotes.iloc[1]
+    assert cheap["bid"] == 0.0 and np.isnan(cheap["iv"]) and np.isnan(cheap["underlying_bid"])  # 0 IV = missing
+    assert normal["iv"] == 0.21 and normal["option_type"] == "P" and normal["multiplier"] == 100
+    assert normal["contract"] == "SPY 2016-02-19 P 190.00" and normal["quote_date"] == pd.Timestamp("2016-01-04")
+
+
+def test_option_loader_requires_calcs_columns(tmp_path):
+    from .conftest import make_settings
+    path = _cboe_file(tmp_path / "UnderlyingOptionsEODQuotes_2016-01-04.zip", [ROW],
+                      drop=["implied_volatility_1545", "delta_1545", "active_underlying_price_1545"])
+    with pytest.raises(ValueError, match="with Calcs"):
+        data.load_option_quotes([path], make_settings(tmp_path))

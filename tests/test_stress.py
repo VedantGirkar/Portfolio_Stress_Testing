@@ -118,3 +118,41 @@ def test_scenario_returns_flags_validation_inside_training(tmp_path):
     assert groups["inner"] == "validation (overlaps training)"  # never counted as out-of-sample
     assert groups["crash"] == "train" and "old" not in matrix.index  # no data, no row
     assert matrix.loc["crash", "A"] == pytest.approx(-0.4)
+
+
+def test_capped_replay_stops_at_the_puts_expiry(tmp_path):
+    s = make_settings(tmp_path, stress_events=EVENT)
+    holdings, risk = _book()
+    stocks = holdings.loc[holdings["ticker"] != "CASH"].set_index("ticker")
+    history = _history()
+    vix = pd.Series(0.3, index=history.index)
+    full = stress.capped_replay(stocks, history, risk.set_index("ticker")["beta"], vix, max_days=365, s=s)
+    cut = stress.capped_replay(stocks, history, risk.set_index("ticker")["beta"], vix.iloc[:30], max_days=14, s=s)
+    crash_full, crash_cut = full.set_index("scenario").loc["crash"], cut.set_index("scenario").loc["crash"]
+    assert crash_full["capped_end"] == crash_full["window_end"] and crash_full["spy_return"] == pytest.approx(-0.4)
+    assert crash_cut["capped_end"] <= crash_cut["window_start"] + pd.Timedelta(days=14)
+    assert -0.4 < crash_cut["spy_return"] < 0 and crash_cut["elapsed_years"] == pytest.approx(14 / 365, abs=3 / 365)
+    assert crash_full["stress_vol"] == 0.3 and crash_full["available"]
+    assert "old" not in set(full["scenario"])  # no data for that event
+    # the 30-day volatility series misses the later trough date: flagged unavailable, never assumed
+    assert not stress.capped_replay(stocks, history, risk.set_index("ticker")["beta"], vix.iloc[:30], 365, s
+                                    ).set_index("scenario").loc["crash", "available"]
+
+
+def test_hypothetical_scenarios_carry_the_market_move(tmp_path):
+    s = make_settings(tmp_path)
+    holdings, risk = _book()
+    stocks = holdings.loc[holdings["ticker"] != "CASH"].set_index("ticker")
+    defs, _ = stress.hypothetical_shocks(stocks, risk.set_index("ticker")["beta"], "Energy", s)
+    moves = {d["scenario"]: d["benchmark_return"] for d in defs}
+    assert moves["market-20%"] == -0.2 and moves["sector_Energy"] == 0.0 and moves["combined"] == -0.2
+
+
+def test_capped_replay_rejects_volatility_in_index_points(tmp_path):
+    s = make_settings(tmp_path, stress_events=EVENT)
+    holdings, risk = _book()
+    stocks = holdings.loc[holdings["ticker"] != "CASH"].set_index("ticker")
+    history = _history()
+    points = pd.Series(30.0, index=history.index)  # VIX quoted as 30, not 0.30
+    with pytest.raises(ValueError, match="decimal"):
+        stress.capped_replay(stocks, history, risk.set_index("ticker")["beta"], points, 365, s)

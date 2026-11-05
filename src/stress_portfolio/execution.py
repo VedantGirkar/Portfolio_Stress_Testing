@@ -4,10 +4,12 @@ import numpy as np
 import pandas as pd
 
 from .config import Settings
-from .costs import stock_costs
+from .costs import option_costs, stock_costs
 
 FILL_COLUMNS = ["ticker", "order_qty", "filled_qty", "ref_price", "fill_price", "commission", "spread_cost",
                 "slippage_cost", "total_cost", "status", "reason"]
+OPTION_FILL_COLUMNS = ["contract", "order_qty", "filled_qty", "bid", "ask", "multiplier", "fill_price",
+                       "commission", "spread_cost", "slippage_cost", "total_cost", "status", "reason"]
 
 
 def generate_orders(positions: dict[str, float], target_weights: pd.Series, decision_prices: pd.Series,
@@ -56,6 +58,39 @@ def execute(orders: pd.DataFrame, open_prices: pd.Series, cash: float, s: Settin
 
     costs = stock_costs(df["filled_qty"], df["ref_price"].fillna(0.0), s, split_factor=df["split_factor"])
     return pd.concat([df, costs], axis=1)[FILL_COLUMNS]
+
+
+def execute_options(orders: pd.DataFrame, quotes: pd.DataFrame, cash: float, s: Settings) -> pd.DataFrame:
+    """Fill option orders (contract, order_qty) against the fill session's 15:45 quotes (index = contract,
+    columns bid, ask, multiplier). Buys need a positive ask and a known bid; sells need a known bid, and a zero
+    bid is a real fill at 0. Sells first, then buys cut to whole contracts the available cash can pay for."""
+    df = orders[["contract", "order_qty"]].copy()
+    q = quotes.reindex(df["contract"])
+    df["bid"], df["ask"], df["multiplier"] = q["bid"].values, q["ask"].values, q["multiplier"].values
+    buy = df["order_qty"] > 0
+    bad = df["bid"].isna() | df["multiplier"].isna() | (buy & ~(df["ask"] > 0))
+    df["filled_qty"] = df["order_qty"].where(~bad, 0.0)
+    df["status"] = np.where(bad, "rejected", "filled")
+    df["reason"] = np.where(bad, "no usable quote for this contract", "")
+
+    def need(rows):
+        c = option_costs(rows["filled_qty"], rows["bid"], rows["ask"], rows["multiplier"], s)
+        return float((rows["filled_qty"] * rows["multiplier"] * c["fill_price"] + c["commission"]).sum())
+
+    available = cash - need(df.loc[df["filled_qty"] < 0])
+    for i in df.index[df["filled_qty"] > 0]:
+        one = option_costs(pd.Series([1.0]), df.loc[[i], "bid"].reset_index(drop=True),
+                           df.loc[[i], "ask"].reset_index(drop=True), df.loc[[i], "multiplier"].reset_index(drop=True), s)
+        per = float(df.at[i, "multiplier"] * one.at[0, "fill_price"] + one.at[0, "commission"])
+        fit = min(df.at[i, "filled_qty"], np.floor(max(available, 0.0) / per))
+        if fit < df.at[i, "filled_qty"]:
+            df.at[i, "status"], df.at[i, "reason"] = ("adjusted", "reduced to fit available cash") if fit > 0 \
+                else ("rejected", "insufficient cash")
+        df.at[i, "filled_qty"] = fit
+        available -= fit * per
+
+    costs = option_costs(df["filled_qty"], df["bid"].fillna(0.0), df["ask"].fillna(0.0), df["multiplier"].fillna(0.0), s)
+    return pd.concat([df, costs], axis=1)[OPTION_FILL_COLUMNS]
 
 
 def _cash_need(rows: pd.DataFrame, s: Settings) -> float:

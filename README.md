@@ -15,7 +15,8 @@ See `PROJECT_SPECIFICATION.md` for the full specification and `CLAUDE.md` for wo
 | 5. Optimization | Implemented: equal-weight, minimum-variance, mean-variance and stress-aware candidates for 10/20/30-stock universes (cvxpy), efficient frontier, stress-vs-return trade-off, cost estimates |
 | 6. Rebalancing and preliminary backtest | Implemented: monthly decision policy (configurable `rebalance_frequency`), walk-forward backtest 2016–today of buy-and-hold, equal-weight, minimum-variance and stress-aware strategies (equity-only, survivorship-biased) |
 | 7. Hedge decision | Decided: delta-based, long SPY puts, worst training stress ≤ 35% NAV, premium ≤ 3% NAV/year, Cboe DataShop SPY option EOD data (see `PROJECT_SPECIFICATION.md` §5.11 decision record) |
-| 8–10. Hedging, hedged backtest, final validation | Not started; hedging needs the Cboe SPY option files in `data/raw/` first |
+| 8. Hedging | In progress. Built and tested offline: Black-Scholes put pricing and Greeks, put selection, sizing to the stress budget within the premium cap, option positions in the ledger (open, close, expiry), option costs and fills, a Cboe file loader, and stress replays cut at the put's life. Not yet run on real data or wired into `build`, `backtest` or the dashboard: needs the Cboe SPY option files in `data/raw/` and ^VIX history |
+| 9–10. Hedged backtest, final validation | Not started |
 
 ## Setup
 
@@ -65,6 +66,8 @@ uv run streamlit run dashboard/app.py
 Shows the latest (or any saved) run. Build runs show NAV, cash, actual vs target weights, holdings and trades with costs, a Risk tab with VaR/ES, drawdown, beta, risk contributions, correlations and a VaR backtest, a Stress tab with every scenario's loss next to SPY's and a per-holding breakdown, an Optimization tab with the frontier, the stress-vs-return chart, all candidates and a weight comparison, and (with a backtest run) Rebalancing and Backtest tabs with the decision log, NAV and drawdown curves, holdings counts and costs. Every run shows core target weights by stock and sector, the shortlist by sector, reserves grouped by sector, scores and eligibility. Tabs for later milestones are present but empty.
 
 ## Known limitations
+
+- Hedge pricing uses Black-Scholes (European) for SPY's American puts, so model values are somewhat low, most for deep in-the-money puts in a crash. Normal-day marks will come from Cboe quotes; the model is used for stress repricing, sizing and missing Greeks.
 
 - Uses the current constituent list, not point-in-time membership. Fine for today's selection; a historical backtest needs point-in-time membership first.
 - Yahoo prices and dividends are split-adjusted, so share quantities are in split-adjusted units, and dividends are credited on the ex-date rather than the pay date.

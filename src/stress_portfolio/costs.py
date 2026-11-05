@@ -1,6 +1,6 @@
-"""Stock trading costs, shared by execution and reports.
+"""Stock and option trading costs, shared by execution and reports.
 
-Half-spread and slippage are inside the fill price; commission is the only separate cash fee.
+Half-spread (and, for stocks, slippage) is inside the fill price; commission is the only separate cash fee.
 """
 
 import numpy as np
@@ -32,6 +32,27 @@ def stock_costs(quantity: pd.Series, ref_price: pd.Series, s: Settings, scenario
         "spread_cost": shares * spread,
         "slippage_cost": shares * slip,
     })
+    out["total_cost"] = out[["commission", "spread_cost", "slippage_cost"]].sum(axis=1)
+    return out
+
+
+def option_costs(contracts: pd.Series, bid: pd.Series, ask: pd.Series, multiplier: pd.Series, s: Settings,
+                 scenario: str | None = None) -> pd.DataFrame:
+    """Itemized costs for signed option contracts (+ buy, - sell) against a quoted bid/ask.
+
+    Buys fill at the ask and sells at the bid. The half-spread around the mid is the implicit spread cost
+    (scaled by the friction scenario, so "base" is exactly the quote); commission plus exchange/clearing fees
+    per contract is the only separate cash fee. No extra slippage: the spread is already inside the fill.
+    Premium is a funding cash flow, not a cost.
+    """
+    mult = SCENARIOS[scenario or s.cost_scenario]
+    n = contracts.astype(float)
+    side = np.sign(n)
+    mid = (bid + ask) / 2
+    half = (ask - bid) / 2 * mult
+    fee = (s.option_commission_per_contract + s.option_fees_per_contract) * mult
+    out = pd.DataFrame({"fill_price": (mid + side * half).clip(lower=0.0), "commission": n.abs() * fee,
+                        "spread_cost": n.abs() * multiplier * half, "slippage_cost": 0.0})
     out["total_cost"] = out[["commission", "spread_cost", "slippage_cost"]].sum(axis=1)
     return out
 

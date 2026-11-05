@@ -291,14 +291,18 @@ Chosen by the user after the gate discussion. Numbers are from build run `202610
 | Data source | Cboe DataShop Option EOD Summary (layout v1.1), SPY only, with Calcs, from 2015-12-01. One zipped CSV per day (`UnderlyingOptionsEODCalcs_YYYY-MM-DD.zip`), stored under `data/raw/` and not committed. Fields used: NBBO bid/ask at 15:45 and at the close, `implied_volatility_1545` and the 15:45 Greeks, open interest. |
 | Data handling | IV of 0 means missing (no quotes, price below intrinsic, or above Cboe's cap), never zero volatility. A zero bid is a real quote: the put can't be sold for value. Cboe's IV/Greek model inputs are not documented, so their values are labeled vendor-observed; our own repricing uses a documented model. On early-close days the "1545" snapshot is taken at 12:45 ET. |
 
-Proposed defaults, to confirm when milestone 8 starts:
+Confirmed at the start of milestone 8 (2026-11-04):
 
-- Expiry: a listed expiry at least the next monthly review plus 2 weeks ahead.
-- Review: close, roll or resize at each monthly review, and re-check the hedge after every stock change.
-- Triggers: an extra review when net beta-delta drifts more than 10% of NAV from target.
-- Exercise: no early exercise; close puts before expiry.
-
-Open for milestone 8: hedge fill timing. Stock trades fill at the next session's open, but the data has no option quote at the open. One possible convention is to decide at the close and fill at the next session's 15:45 ask (buy) or bid (sell).
+| Item | Decision |
+|---|---|
+| Pricing model | Black-Scholes-Merton for European puts with an assumed continuous dividend yield (1.3%). SPY options are American, so the model undervalues them somewhat, most for deep in-the-money puts in a crash. Used for stress repricing, sizing and missing Greeks; normal-day marks come from observed quotes. |
+| Fills and marks | Decide at the close; fill at the next session's 15:45 quote (buy at the ask, sell at the bid). Puts are valued at the 15:45 bid-ask mid, so the half-spread paid shows as a cost at once. |
+| Option costs | $0.65 commission + $0.05 exchange/clearing fees per contract. The spread is inside the fill price; no extra slippage. |
+| Strike | Nearest listed strike to 95% of the underlying price, in the earliest listed expiry at least the next review plus 14 days ahead. |
+| Review and roll | Close, roll or resize at each scheduled review; re-check after every stock change; extra review when net beta-dollar delta moves more than 10% of NAV from the last hedge. No early exercise; close before expiry. If a put is still held at expiry, it is settled as exercise immediately covered (net intrinsic cash), because a short SPY position is outside the mandate. |
+| Stress horizon | Historical events are cut at the put's remaining life: peak to the trough or to expiry, whichever comes first. Hypothetical shocks are instantaneous. Puts are fully repriced at the scenario end. The stock loss is cut at the same date, so long events count only their first part: on build run `20261028-190314-98b6d0` with a 2-month put, GFC falls from -54% to -0.6% and dot-com from -19% to -1%, leaving COVID (-40%, 33 days) as the binding scenario. "Target met" therefore means the worst capped scenario is within budget, not that the full GFC loss is (confirmed by the user, 2026-11-04). |
+| Stress volatility | Historical: the observed volatility index (^VIX) on the cut-off date; an event without a reading is marked unavailable. Hypothetical: today's IV plus 15 vol points (assumption). |
+| Premium budget measure | Net cost: premium paid minus resale at the next review. Before each purchase this is estimated with the model (spot and volatility unchanged); the backtest will track the actual net cost over a rolling 12 months. |
 
 Open for milestone 9: whether the stress-aware optimizer sees hedged stress losses, which would overlap the hedge with the 35% budget constraint.
 

@@ -45,7 +45,6 @@ def apply_shocks(scenario: str, stocks: pd.DataFrame, shocks: pd.Series, sources
 
 def replay_events(stocks: pd.DataFrame, history: pd.DataFrame, betas: pd.Series, s: Settings) -> tuple[list, list]:
     """Historical replays. history: wide adj_close of the holdings, SPY and sector ETFs."""
-    etf_of = dict(s.sector_etfs)
     spy = history[s.benchmark_ticker]
     defs, positions = [], []
     for name, label, lo, hi, group in s.stress_events:
@@ -55,17 +54,7 @@ def replay_events(stocks: pd.DataFrame, history: pd.DataFrame, betas: pd.Series,
                          "available": False, "note": f"no {s.benchmark_ticker} prices between {lo} and {hi}"})
             continue
         peak, trough, spy_ret = worst_drawdown_window(searched)
-        shocks, sources = {}, {}
-        for t, row in stocks.iterrows():
-            own = window_return(history[t], peak, trough) if t in history else None
-            etf = etf_of.get(row["sector"])
-            proxy = window_return(history[etf], peak, trough) if etf in history else None
-            if own is not None:
-                shocks[t], sources[t] = own, "own history"
-            elif proxy is not None:
-                shocks[t], sources[t] = proxy, f"sector ETF proxy ({etf})"
-            else:
-                shocks[t], sources[t] = betas[t] * spy_ret, f"beta x {s.benchmark_ticker} proxy"
+        shocks, sources = _event_shocks(stocks, history, betas, peak, trough, spy_ret, s)
         defs.append({"scenario": name, "label": label, "kind": "historical", "group": group, "available": True,
                      "window_start": peak.date(), "window_end": trough.date(),
                      "sessions": int(len(spy.loc[peak:trough]) - 1), "benchmark_return": spy_ret,
@@ -74,30 +63,78 @@ def replay_events(stocks: pd.DataFrame, history: pd.DataFrame, betas: pd.Series,
     return defs, positions
 
 
+def _event_shocks(stocks: pd.DataFrame, history: pd.DataFrame, betas: pd.Series, start, end, spy_ret: float,
+                  s: Settings) -> tuple[dict, dict]:
+    """Each stock's return start -> end: own prices, else its sector ETF, else beta x SPY (flagged proxies)."""
+    etf_of = dict(s.sector_etfs)
+    shocks, sources = {}, {}
+    for t, row in stocks.iterrows():
+        own = window_return(history[t], start, end) if t in history else None
+        etf = etf_of.get(row["sector"])
+        proxy = window_return(history[etf], start, end) if etf in history else None
+        if own is not None:
+            shocks[t], sources[t] = own, "own history"
+        elif proxy is not None:
+            shocks[t], sources[t] = proxy, f"sector ETF proxy ({etf})"
+        else:
+            shocks[t], sources[t] = betas[t] * spy_ret, f"beta x {s.benchmark_ticker} proxy"
+    return shocks, sources
+
+
+def capped_replay(stocks: pd.DataFrame, history: pd.DataFrame, betas: pd.Series, vol_index: pd.Series,
+                  max_days: int, s: Settings) -> pd.DataFrame:
+    """Historical events cut at a put's remaining life: each event starts at its usual peak and ends at the
+    trough or at the last session within `max_days` calendar days of the peak, whichever comes first.
+
+    Returns per event the book's stock P&L, SPY's return and the volatility index (decimal, e.g. VIX/100) on
+    the end date, which hedging uses to reprice puts. An event without a volatility reading is marked
+    unavailable rather than given an assumed volatility.
+    """
+    if (vol_index.dropna() > 3).any():
+        raise ValueError("vol_index must be a decimal (VIX / 100), not index points")
+    spy = history[s.benchmark_ticker]
+    rows = []
+    for name, label, lo, hi, group in s.stress_events:
+        searched = spy.loc[lo:hi].dropna()
+        if len(searched) < 2:
+            continue
+        peak, trough, _ = worst_drawdown_window(searched)
+        end = spy.loc[peak:min(trough, peak + pd.Timedelta(days=max_days))].dropna().index[-1]
+        spy_ret = float(spy[end] / spy[peak] - 1)
+        shocks, _ = _event_shocks(stocks, history, betas, peak, end, spy_ret, s)
+        vol = vol_index.get(end)
+        rows.append({"scenario": name, "label": label, "group": group, "window_start": peak, "window_end": trough,
+                     "capped_end": end, "elapsed_years": (end - peak).days / 365.0,
+                     "book_pnl_usd": float((stocks["market_value"] * pd.Series(shocks).clip(lower=-1.0)).sum()),
+                     "spy_return": spy_ret, "stress_vol": vol, "available": vol is not None and pd.notna(vol)})
+    return pd.DataFrame(rows)
+
+
 def hypothetical_shocks(stocks: pd.DataFrame, betas: pd.Series, combined_sector: str,
                         s: Settings) -> tuple[list, list]:
     """Beta-scaled market shocks, single-sector shocks (one per sector in `stocks`), and a compounded
     market-plus-sector shock in `combined_sector`."""
     defs, positions = [], []
 
-    def add(name, label, shocks, source, note):
+    def add(name, label, shocks, source, note, market):
         defs.append({"scenario": name, "label": label, "kind": "hypothetical", "group": "train",
-                     "available": True, "note": note})
+                     "available": True, "benchmark_return": market, "note": note})
         positions.append(apply_shocks(name, stocks, shocks, pd.Series(source, index=stocks.index)))
 
     for m in s.market_shocks:
-        add(f"market{m:+.0%}", f"Market {m:+.0%}", betas * m, "beta x market", "stock return = beta x market move")
+        add(f"market{m:+.0%}", f"Market {m:+.0%}", betas * m, "beta x market", "stock return = beta x market move",
+            m)
     m = s.combined_market_shock
     add(f"market{m:+.0%}_beta1", f"Market {m:+.0%}, all betas 1", pd.Series(m, index=stocks.index),
-        "market, beta forced to 1", "crisis case: every stock moves with the market one-for-one")
+        "market, beta forced to 1", "crisis case: every stock moves with the market one-for-one", m)
     for sector in sorted(stocks["sector"].unique()):
         shock = (stocks["sector"] == sector) * s.sector_shock
         add(f"sector_{sector}", f"{sector} {s.sector_shock:+.0%}", shock.astype(float), "sector shock",
-            "this sector only, market flat")
+            "this sector only, market flat", 0.0)
     sector_part = (stocks["sector"] == combined_sector) * s.combined_sector_shock
     combined = (1 + betas * m) * (1 + sector_part) - 1
     add("combined", f"Market {m:+.0%} + {combined_sector} {s.combined_sector_shock:+.0%}", combined,
-        "beta x market, compounded with sector", f"riskiest sector of the current book: {combined_sector}")
+        "beta x market, compounded with sector", f"riskiest sector of the current book: {combined_sector}", m)
     return defs, positions
 
 
